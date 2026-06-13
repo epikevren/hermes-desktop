@@ -4,10 +4,12 @@ export default {
     "Cada perfil es un espacio de trabajo aislado de Hermes con su propia configuración, memoria y habilidades",
   newAgent: "Nuevo agente",
   namePlaceholder: "Nombre del agente (p. ej. coder)",
-  cloneConfig: "Clonar la configuración y las API keys del perfil predeterminado",
+  cloneConfig:
+    "Clonar la configuración y las API keys del perfil predeterminado",
   createFailed: "No se pudo crear el perfil",
   creating: "Creando...",
   create: "Crear",
+  deleteFailed: "No se pudo eliminar el perfil",
   active: "Activo",
   noModel: "No hay un modelo configurado",
   skillsCount: "{{count}} habilidades",
@@ -20,4 +22,7 @@ export default {
   deleteTitle: "Eliminar agente",
   auto: "Automático",
   local: "Local",
+  manageProfiles: "Gestionar perfiles",
+  switchProfile: "Cambiar perfil",
+  defaultTag: "predeterminado",
 } as const;

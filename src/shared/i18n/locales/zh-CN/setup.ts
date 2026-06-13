@@ -13,6 +13,7 @@ export default {
   },
   localPresets: {
     lmstudio: "LM Studio",
+    atomicchat: "Atomic Chat",
     ollama: "Ollama",
     vllm: "vLLM",
     llamacpp: "llama.cpp",
@@ -40,6 +41,8 @@ export default {
   continue: "继续",
   saving: "保存中...",
   apiKeyLabel: "{{provider}} API Key",
+  noApiKeyRequired:
+    "{{provider}} 不需要 API Key。Hermes 会使用本机 CLI/OAuth 配置。",
   localNoKeyNeeded: "无需 API Key",
   localLlm: "本地模型",
   modelBaseUrlPlaceholder: "http://localhost:1234/v1",

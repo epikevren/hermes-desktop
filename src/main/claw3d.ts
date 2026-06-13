@@ -6,11 +6,13 @@ import {
   unlinkSync,
   mkdirSync,
 } from "fs";
-import { join } from "path";
+import { join, win32 } from "path";
 import { homedir } from "os";
 import { createConnection } from "net";
 import { getEnhancedPath, HERMES_HOME } from "./installer";
 import { stripAnsi, safeWriteFile } from "./utils";
+import { getApiServerKey, getConnectionConfig, getModelConfig } from "./config";
+import http from "http";
 
 const HERMES_OFFICE_REPO = "https://github.com/fathah/hermes-office";
 const HERMES_OFFICE_DIR = join(HERMES_HOME, "hermes-office");
@@ -19,7 +21,9 @@ const ADAPTER_PID_FILE = join(HERMES_HOME, "claw3d-adapter.pid");
 const PORT_FILE = join(HERMES_HOME, "claw3d-port");
 const WS_URL_FILE = join(HERMES_HOME, "claw3d-ws-url");
 const DEFAULT_PORT = 3000;
-const DEFAULT_WS_URL = "ws://localhost:18789";
+const OLD_DEFAULT_WS_URL = "ws://localhost:18789";
+const DEFAULT_ADAPTER_PORT = 18989;
+const DEFAULT_WS_URL = `ws://localhost:${DEFAULT_ADAPTER_PORT}`;
 const CLAW3D_SETTINGS_DIR = join(homedir(), ".openclaw", "claw3d");
 
 let devServerProcess: ChildProcess | null = null;
@@ -34,11 +38,23 @@ export interface ResolvedCommand {
   windowsScript: boolean;
 }
 
-interface CommandInvocation {
+export interface CommandInvocation {
   command: string;
   args: string[];
   windowsVerbatimArguments?: boolean;
 }
+
+interface NpmInvocationOptions {
+  platform?: NodeJS.Platform;
+  fileExists?: (path: string) => boolean;
+}
+
+type Claw3dScript = "dev" | "hermes-adapter";
+
+const CLAW3D_SCRIPT_ARGS: Record<Claw3dScript, string[]> = {
+  dev: ["server/index.js", "--dev"],
+  "hermes-adapter": ["server/hermes-gateway-adapter.js"],
+};
 
 export function isWindowsCommandScript(command: string): boolean {
   return /\.(cmd|bat)$/i.test(command);
@@ -132,6 +148,61 @@ function createCommandInvocation(
   return { command: resolved.command, args };
 }
 
+function createWindowsNpmCliInvocation(
+  npmCommand: string,
+  args: string[],
+  fileExists: (path: string) => boolean,
+): CommandInvocation | null {
+  const npmDir = win32.dirname(npmCommand);
+  const nodeCandidates = [
+    win32.join(npmDir, "node.exe"),
+    win32.join(npmDir, "..", "..", "..", "node.exe"),
+  ];
+  const npmCliCandidates = [
+    win32.join(npmDir, "node_modules", "npm", "bin", "npm-cli.js"),
+    win32.join(npmDir, "npm-cli.js"),
+  ];
+
+  const nodeExe = nodeCandidates.find(fileExists);
+  const npmCli = npmCliCandidates.find(fileExists);
+  if (!npmCli) return null;
+
+  return {
+    command: nodeExe || "node",
+    args: [npmCli, ...args],
+  };
+}
+
+export function createNpmCommandInvocation(
+  resolved: ResolvedCommand,
+  args: string[],
+  options: NpmInvocationOptions = {},
+): CommandInvocation {
+  const platform = options.platform ?? process.platform;
+  const fileExists = options.fileExists ?? existsSync;
+
+  if (platform === "win32") {
+    const directNpm = createWindowsNpmCliInvocation(
+      resolved.command,
+      args,
+      fileExists,
+    );
+    if (directNpm) return directNpm;
+  }
+
+  return createCommandInvocation(resolved, args);
+}
+
+export function createClaw3dScriptInvocation(
+  script: Claw3dScript,
+  nodeCommand = "node",
+): CommandInvocation {
+  return {
+    command: nodeCommand,
+    args: CLAW3D_SCRIPT_ARGS[script],
+  };
+}
+
 function getSavedPort(): number {
   try {
     const port = parseInt(readFileSync(PORT_FILE, "utf-8").trim(), 10);
@@ -154,6 +225,7 @@ export function getClaw3dPort(): number {
 function getSavedWsUrl(): string {
   try {
     const url = readFileSync(WS_URL_FILE, "utf-8").trim();
+    if (url === OLD_DEFAULT_WS_URL) return DEFAULT_WS_URL;
     return url || DEFAULT_WS_URL;
   } catch {
     return DEFAULT_WS_URL;
@@ -170,12 +242,125 @@ export function getClaw3dWsUrl(): string {
   return getSavedWsUrl();
 }
 
+export function adapterPortFromWsUrl(url: string): number {
+  try {
+    const parsed = new URL(url);
+    if (parsed.port) {
+      const port = Number(parsed.port);
+      if (Number.isInteger(port) && port > 0 && port <= 65535) return port;
+    }
+  } catch {
+    /* fall through */
+  }
+  return DEFAULT_ADAPTER_PORT;
+}
+
+/**
+ * The model Hermes Office should default to. Office runs against the same
+ * gateway as the desktop chat, so it should use the same configured model
+ * rather than a generic `hermes` agent the user never selected (issue
+ * #256). Falls back to `hermes` only when no model is configured.
+ */
+function resolveOfficeModel(): string {
+  try {
+    const model = getModelConfig().model?.trim();
+    if (model) return model;
+  } catch {
+    /* no model configured — fall through to the default */
+  }
+  return "hermes";
+}
+
+/**
+ * Build the `.env` Hermes One writes into the hermes-office directory.
+ * Exported so the contents (notably `HERMES_MODEL`, issue #256) can be
+ * unit tested without a live Office install.
+ */
+export function buildOfficeEnv(opts: {
+  port: number;
+  url: string;
+  apiKey: string;
+  model: string;
+  adapterPort?: number;
+}): string {
+  const adapterPort = opts.adapterPort ?? adapterPortFromWsUrl(opts.url);
+  return [
+    "# Auto-configured by Hermes One",
+    `PORT=${opts.port}`,
+    `HOST=127.0.0.1`,
+    `NEXT_PUBLIC_GATEWAY_URL=${opts.url}`,
+    `CLAW3D_GATEWAY_URL=${opts.url}`,
+    `CLAW3D_GATEWAY_TOKEN=${opts.apiKey}`,
+    `CLAW3D_GATEWAY_ADAPTER_TYPE=hermes`,
+    `HERMES_API_KEY=${opts.apiKey}`,
+    `HERMES_ADAPTER_PORT=${adapterPort}`,
+    `HERMES_MODEL=${opts.model || "hermes"}`,
+    `HERMES_AGENT_NAME=Hermes`,
+    "",
+  ].join("\n");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+export function buildOfficeSettings(
+  existing: Record<string, unknown>,
+  opts: { url: string; apiKey: string },
+): Record<string, unknown> {
+  const existingGateway = isRecord(existing.gateway) ? existing.gateway : {};
+  const existingProfiles = isRecord(existingGateway.profiles)
+    ? existingGateway.profiles
+    : {};
+  const hermesProfile = {
+    url: opts.url,
+    token: opts.apiKey,
+  };
+  return {
+    ...existing,
+    // Keep the legacy top-level fields for older Office builds and rollback.
+    adapter: "hermes",
+    url: opts.url,
+    token: opts.apiKey,
+    gateway: {
+      ...existingGateway,
+      url: opts.url,
+      token: opts.apiKey,
+      adapterType: "hermes",
+      profiles: {
+        ...existingProfiles,
+        hermes: hermesProfile,
+      },
+      lastKnownGood: {
+        url: opts.url,
+        token: opts.apiKey,
+        adapterType: "hermes",
+      },
+    },
+  };
+}
+
+export function writeOfficeFileIfChanged(filePath: string, content: string): boolean {
+  try {
+    if (existsSync(filePath) && readFileSync(filePath, "utf-8") === content) {
+      return false;
+    }
+  } catch {
+    /* If the existing file cannot be read, try to repair it below. */
+  }
+  safeWriteFile(filePath, content);
+  return true;
+}
+
 /**
  * Write Claw3D settings to ~/.openclaw/claw3d/settings.json
  * and .env in the claw3d directory so onboarding is skipped.
  */
 function writeClaw3dSettings(wsUrl?: string): void {
   const url = wsUrl || getSavedWsUrl();
+  const adapterPort = adapterPortFromWsUrl(url);
+  // Gateway bearer token — empty string when the gateway has no API_SERVER_KEY.
+  const apiKey = getApiServerKey();
 
   // Write ~/.openclaw/claw3d/settings.json
   try {
@@ -190,13 +375,8 @@ function writeClaw3dSettings(wsUrl?: string): void {
       /* fresh */
     }
 
-    const settings = {
-      ...existing,
-      adapter: "hermes",
-      url,
-      token: "",
-    };
-    safeWriteFile(settingsPath, JSON.stringify(settings, null, 2));
+    const settings = buildOfficeSettings(existing, { url, apiKey });
+    writeOfficeFileIfChanged(settingsPath, JSON.stringify(settings, null, 2));
   } catch {
     /* non-fatal */
   }
@@ -205,30 +385,30 @@ function writeClaw3dSettings(wsUrl?: string): void {
   try {
     if (existsSync(HERMES_OFFICE_DIR)) {
       const envPath = join(HERMES_OFFICE_DIR, ".env");
-      const port = getSavedPort();
-      const envContent = [
-        "# Auto-configured by Hermes Desktop",
-        `PORT=${port}`,
-        `HOST=127.0.0.1`,
-        `NEXT_PUBLIC_GATEWAY_URL=${url}`,
-        `CLAW3D_GATEWAY_URL=${url}`,
-        `CLAW3D_GATEWAY_TOKEN=`,
-        `HERMES_ADAPTER_PORT=18789`,
-        `HERMES_MODEL=hermes`,
-        `HERMES_AGENT_NAME=Hermes`,
-        "",
-      ].join("\n");
-      safeWriteFile(envPath, envContent);
+      writeOfficeFileIfChanged(
+        envPath,
+        buildOfficeEnv({
+          port: getSavedPort(),
+          url,
+          apiKey,
+          model: resolveOfficeModel(),
+          adapterPort,
+        }),
+      );
     }
   } catch {
     /* non-fatal */
   }
 }
 
-function checkPort(port: number): Promise<boolean> {
+function probeTcp(
+  port: number,
+  host = "127.0.0.1",
+  timeoutMs = 300,
+): Promise<boolean> {
   return new Promise((resolve) => {
-    const socket = createConnection({ port, host: "127.0.0.1" });
-    socket.setTimeout(300); // 300ms is plenty for localhost
+    const socket = createConnection({ port, host });
+    socket.setTimeout(timeoutMs);
     socket.on("connect", () => {
       socket.destroy();
       resolve(true); // port is in use
@@ -244,6 +424,10 @@ function checkPort(port: number): Promise<boolean> {
   });
 }
 
+function checkPort(port: number): Promise<boolean> {
+  return probeTcp(port);
+}
+
 export interface Claw3dStatus {
   cloned: boolean;
   installed: boolean;
@@ -254,6 +438,12 @@ export interface Claw3dStatus {
   portInUse: boolean;
   wsUrl: string;
   error: string; // last error from either process
+  // Populated in SSH tunnel mode when a Claw3D / hermes-office service is
+  // running on the remote host. Renderer should prefer this over launching
+  // a local dev server. Null/undefined when not in SSH mode or when the
+  // remote service is unreachable.
+  remoteUrl?: string | null;
+  remoteSource?: "ssh" | null;
 }
 
 export interface Claw3dSetupProgress {
@@ -310,25 +500,96 @@ function isAdapterRunning(): boolean {
   return false;
 }
 
+// Probe an HTTP endpoint with a short timeout. Returns true if any response
+// arrives (we don't care about the status code — even a 404 confirms a
+// listener). Used to detect remote Claw3D / hermes-office without dragging
+// in the SSH tunnel machinery.
+function probeHttp(url: string, timeoutMs = 1500): Promise<boolean> {
+  return new Promise((resolve) => {
+    const req = http.request(
+      url,
+      { method: "GET", timeout: timeoutMs },
+      (res) => {
+        res.resume();
+        resolve(true);
+      },
+    );
+    req.on("error", () => resolve(false));
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(false);
+    });
+    req.end();
+  });
+}
+
+export async function waitForClaw3dReady(
+  timeoutMs = 45000,
+  intervalMs = 1000,
+): Promise<boolean> {
+  const port = getSavedPort();
+  const conn = getConnectionConfig();
+  const host = conn.mode === "ssh" && conn.ssh?.host ? conn.ssh.host : "127.0.0.1";
+  const url = `http://${host}:${port}/office`;
+  const adapterPort = adapterPortFromWsUrl(getSavedWsUrl());
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const officeReady = await probeHttp(url, Math.min(intervalMs, 2000));
+    const adapterReady =
+      conn.mode === "local" ||
+      conn.mode === "remote" ||
+      !conn.ssh?.host
+        ? await probeTcp(adapterPort, "127.0.0.1", Math.min(intervalMs, 2000))
+        : true;
+
+    if (officeReady && adapterReady) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  return false;
+}
+
 export async function getClaw3dStatus(): Promise<Claw3dStatus> {
   const cloned = existsSync(join(HERMES_OFFICE_DIR, "package.json"));
   const installed = existsSync(join(HERMES_OFFICE_DIR, "node_modules"));
+  if (installed) {
+    writeClaw3dSettings();
+  }
   const port = getSavedPort();
   const devRunning = isDevServerRunning();
   // Only check port conflict when dev server is NOT running
   const portInUse = devRunning ? false : await checkPort(port);
   const adapterUp = isAdapterRunning();
   const error = devServerError || adapterError;
+
+  // SSH tunnel mode: probe the remote host for a Claw3D / hermes-office
+  // service. The official systemd unit binds Next.js to :3000 by default,
+  // so we try the SSH host at the saved Claw3D port. When reachable, the
+  // renderer can point its webview at it instead of asking the user to
+  // install Claw3D locally.
+  let remoteUrl: string | null = null;
+  const conn = getConnectionConfig();
+  if (conn.mode === "ssh" && conn.ssh?.host) {
+    const candidateUrl = `http://${conn.ssh.host}:${port}`;
+    const reachable = await probeHttp(candidateUrl, 1500);
+    if (reachable) remoteUrl = candidateUrl;
+  }
+
   return {
     cloned,
-    installed,
+    installed: installed || Boolean(remoteUrl),
     devServerRunning: devRunning,
     adapterRunning: adapterUp,
-    running: devRunning && adapterUp,
+    running: (devRunning && adapterUp) || Boolean(remoteUrl),
     port,
     portInUse,
     wsUrl: getSavedWsUrl(),
     error,
+    remoteUrl,
+    remoteSource: remoteUrl ? "ssh" : null,
   };
 }
 
@@ -509,7 +770,7 @@ export async function setupClaw3d(
 
   // Step 2: npm install
   emit(2, "Installing dependencies...", "Running npm install...\n");
-  const npm = createCommandInvocation(findNpm(env.PATH), ["install"]);
+  const npm = createNpmCommandInvocation(findNpm(env.PATH), ["install"]);
 
   await new Promise<void>((resolve, reject) => {
     const proc = spawn(npm.command, npm.args, {
@@ -582,16 +843,18 @@ export function startDevServer(): boolean {
     PATH: getEnhancedPath(),
     HOME: homedir(),
     TERM: "dumb",
+    HERMES_API_KEY: getApiServerKey(),
     PORT: String(port),
   };
-  const npm = createCommandInvocation(findNpm(env.PATH), ["run", "dev"]);
-  const proc = spawn(npm.command, npm.args, {
+  const node = resolveCommand("node", env.PATH);
+  const devScript = createClaw3dScriptInvocation("dev", node.command);
+  const proc = spawn(devScript.command, devScript.args, {
     cwd: HERMES_OFFICE_DIR,
     env,
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
     windowsHide: true,
-    windowsVerbatimArguments: npm.windowsVerbatimArguments,
+    windowsVerbatimArguments: devScript.windowsVerbatimArguments,
   });
 
   devServerProcess = proc;
@@ -655,23 +918,29 @@ export function startAdapter(): boolean {
 
   adapterError = "";
   adapterLogs = "";
+  // The hermes-gateway-adapter authenticates to the Hermes gateway with
+  // `Authorization: Bearer ${HERMES_API_KEY}`. Without it, a gateway that
+  // has an API_SERVER_KEY configured rejects the Office chat with HTTP 401.
   const env = {
     ...process.env,
     PATH: getEnhancedPath(),
     HOME: homedir(),
     TERM: "dumb",
+    HERMES_API_KEY: getApiServerKey(),
+    HERMES_ADAPTER_PORT: String(adapterPortFromWsUrl(getSavedWsUrl())),
   };
-  const npm = createCommandInvocation(findNpm(env.PATH), [
-    "run",
+  const node = resolveCommand("node", env.PATH);
+  const adapterScript = createClaw3dScriptInvocation(
     "hermes-adapter",
-  ]);
-  const proc = spawn(npm.command, npm.args, {
+    node.command,
+  );
+  const proc = spawn(adapterScript.command, adapterScript.args, {
     cwd: HERMES_OFFICE_DIR,
     env,
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
     windowsHide: true,
-    windowsVerbatimArguments: npm.windowsVerbatimArguments,
+    windowsVerbatimArguments: adapterScript.windowsVerbatimArguments,
   });
 
   adapterProcess = proc;
@@ -736,6 +1005,11 @@ export function startAll(): { success: boolean; error?: string } {
   }
 
   const port = getSavedPort();
+
+  // Refresh the `.env` before the processes read it, so Office always
+  // starts against the current port/URL and the desktop's configured
+  // model rather than a value frozen at first setup (issue #256).
+  writeClaw3dSettings();
 
   // Start dev server
   const devOk = startDevServer();

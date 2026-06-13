@@ -34,9 +34,7 @@ describe("parseSseBlock", () => {
   });
 
   it("handles extra whitespace in event type", () => {
-    const result = parseSseBlock(
-      "event:  hermes.tool.progress \ndata: {}",
-    );
+    const result = parseSseBlock("event:  hermes.tool.progress \ndata: {}");
     expect(result).toEqual({
       eventType: "hermes.tool.progress",
       data: "{}",
@@ -49,13 +47,69 @@ describe("parseSseBlock", () => {
 describe("processCustomEvent", () => {
   it("handles hermes.tool.progress with emoji and label", () => {
     const onToolProgress = vi.fn();
+    const onToolEvent = vi.fn();
     const handled = processCustomEvent(
       "hermes.tool.progress",
-      JSON.stringify({ tool: "search_web", emoji: "🔍", label: "Searching" }),
-      { onToolProgress },
+      JSON.stringify({
+        tool: "search_web",
+        toolCallId: "call-1",
+        emoji: "🔍",
+        label: "Searching",
+        status: "running",
+      }),
+      { onToolProgress, onToolEvent },
     );
     expect(handled).toBe(true);
-    expect(onToolProgress).toHaveBeenCalledWith("🔍 Searching");
+    expect(onToolProgress).not.toHaveBeenCalled();
+    expect(onToolEvent).toHaveBeenCalledWith({
+      callId: "call-1",
+      hasStableCallId: true,
+      name: "search_web",
+      status: "running",
+      label: "Searching",
+      emoji: "🔍",
+    });
+  });
+
+  it("handles completed hermes.tool.progress as a structured tool event", () => {
+    const onToolEvent = vi.fn();
+    const handled = processCustomEvent(
+      "hermes.tool.progress",
+      JSON.stringify({
+        tool: "terminal",
+        toolCallId: "call-terminal",
+        status: "completed",
+      }),
+      { onToolEvent },
+    );
+    expect(handled).toBe(true);
+    expect(onToolEvent).toHaveBeenCalledWith({
+      callId: "call-terminal",
+      hasStableCallId: true,
+      name: "terminal",
+      status: "completed",
+      label: "terminal",
+    });
+  });
+
+  it("marks fallback tool ids as synthetic when the gateway omits call ids", () => {
+    const onToolEvent = vi.fn();
+    processCustomEvent(
+      "hermes.tool.progress",
+      JSON.stringify({
+        tool: "terminal",
+        status: "running",
+        label: "terminal",
+      }),
+      { onToolEvent },
+    );
+    expect(onToolEvent).toHaveBeenCalledWith({
+      callId: "terminal:terminal",
+      hasStableCallId: false,
+      name: "terminal",
+      status: "running",
+      label: "terminal",
+    });
   });
 
   it("uses tool name as fallback when label is missing", () => {
@@ -80,22 +134,18 @@ describe("processCustomEvent", () => {
 
   it("ignores unknown event types", () => {
     const onToolProgress = vi.fn();
-    const handled = processCustomEvent(
-      "unknown.event",
-      "{}",
-      { onToolProgress },
-    );
+    const handled = processCustomEvent("unknown.event", "{}", {
+      onToolProgress,
+    });
     expect(handled).toBe(false);
     expect(onToolProgress).not.toHaveBeenCalled();
   });
 
   it("ignores malformed JSON data", () => {
     const onToolProgress = vi.fn();
-    const handled = processCustomEvent(
-      "hermes.tool.progress",
-      "not-json",
-      { onToolProgress },
-    );
+    const handled = processCustomEvent("hermes.tool.progress", "not-json", {
+      onToolProgress,
+    });
     expect(handled).toBe(false);
     expect(onToolProgress).not.toHaveBeenCalled();
   });
@@ -113,14 +163,18 @@ describe("processCustomEvent", () => {
 // ─── processSseData ─────────────────────────────────────
 
 describe("processSseData", () => {
-  function makeState() {
+  function makeState(): { hasContent: boolean; lastError: string } {
     return { hasContent: false, lastError: "" };
   }
 
   it("signals done on [DONE] with content", () => {
     const onDone = vi.fn();
     const state = { hasContent: true, lastError: "" };
-    const result = processSseData("[DONE]", { onChunk: vi.fn(), onDone }, state);
+    const result = processSseData(
+      "[DONE]",
+      { onChunk: vi.fn(), onDone },
+      state,
+    );
     expect(result.done).toBe(true);
     expect(onDone).toHaveBeenCalled();
   });

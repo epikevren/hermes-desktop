@@ -10,6 +10,9 @@ export default {
   memory: "Memoria",
   tools: "Herramientas",
   schedules: "Programaciones",
+  kanban: "Kanban",
   gateway: "Gateway",
   settings: "Configuración",
+  collapseSidebar: "Contraer barra lateral",
+  expandSidebar: "Expandir barra lateral",
 } as const;

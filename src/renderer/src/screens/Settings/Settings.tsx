@@ -1,19 +1,48 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useTheme } from "../../components/ThemeProvider";
-import { THEME_OPTIONS } from "../../constants";
+import { useFont } from "../../components/FontProvider";
+import { THEMES, FONT_OPTIONS } from "../../constants";
 import { useI18n } from "../../components/useI18n";
 import { APP_LOCALES, type AppLocale } from "../../../../shared/i18n";
-import { Download, Upload, FileText, Send } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  Download,
+  Upload,
+  FileText,
+  Send,
+} from "lucide-react";
+import {
+  getAnalyticsConsent,
+  setAnalyticsConsent,
+} from "../../utils/analytics";
+import { ConfigHealth } from "./ConfigHealth";
 
-const TELEGRAM_COMMUNITY_URL = "https://t.me/hermes_agent_desktop";
+const DISCORD_COMMUNITY_URL = "https://discord.gg/vMwcnNPHc";
 
-const LANGUAGE_LABEL_KEYS: Record<AppLocale, string> = {
-  en: "settings.language.english",
-  es: "settings.language.spanish",
-  id: "settings.language.indonesian",
-  "pt-BR": "settings.language.portuguese",
-  "zh-CN": "settings.language.chinese",
+const LANGUAGE_NATIVE_NAMES: Record<AppLocale, string> = {
+  en: "English",
+  es: "Español",
+  id: "Bahasa Indonesia",
+  ja: "日本語",
+  pl: "Polski",
+  "pt-BR": "Português (BR)",
+  "pt-PT": "Português (PT)",
+  tr: "Türkçe",
+  "zh-CN": "简体中文",
+  "zh-TW": "繁體中文（台灣）",
 };
+
+// Build a mask string the same width as the stored API key so the
+// "saved" state of the input looks like a key, not a constant blob.
+// Length is exposed by the main process via PublicConnectionConfig.
+// 0 falls back to 8 dots so the user gets a visible "set" indicator
+// even if main didn't report a length yet. Capped to keep absurdly
+// long keys from blowing up the field.
+function makeApiKeyMask(length: number): string {
+  const n = Math.min(Math.max(length, 8), 128);
+  return "*".repeat(n);
+}
 
 // Read cached values from localStorage for instant display
 function getCachedVersion(): string | null {
@@ -36,7 +65,8 @@ function getCachedOpenClaw(): { found: boolean; path: string | null } | null {
 function Settings({ profile }: { profile?: string }): React.JSX.Element {
   const { t, locale, setLocale } = useI18n();
   const [hermesHome, setHermesHome] = useState("");
-  const { theme, setTheme } = useTheme();
+  const { theme, setTheme, rounded, setRounded } = useTheme();
+  const { font, setFont } = useFont();
 
   // Hermes engine info — initialize from localStorage cache for instant display
   const [hermesVersion, setHermesVersion] = useState<string | null>(
@@ -74,9 +104,13 @@ function Settings({ profile }: { profile?: string }): React.JSX.Element {
   const [connMode, setConnMode] = useState<"local" | "remote" | "ssh">("local");
   const [connRemoteUrl, setConnRemoteUrl] = useState("");
   const [connApiKey, setConnApiKey] = useState("");
+  const [connApiKeyMask, setConnApiKeyMask] = useState("");
+  const [connHasApiKey, setConnHasApiKey] = useState(false);
   const [connTesting, setConnTesting] = useState(false);
   const [connStatus, setConnStatus] = useState<string | null>(null);
   const connLoaded = useRef(false);
+  const [apiServerKeyMissing, setApiServerKeyMissing] = useState(false);
+  const [generatingKey, setGeneratingKey] = useState(false);
 
   // SSH connection state
   const [sshHost, setSshHost] = useState("");
@@ -100,29 +134,41 @@ function Settings({ profile }: { profile?: string }): React.JSX.Element {
   // Network settings
   const [forceIpv4, setForceIpv4] = useState(false);
   const [httpProxy, setHttpProxy] = useState("");
+  const httpProxyRef = useRef("");
+  const savedHttpProxyRef = useRef("");
   const [networkSaved, setNetworkSaved] = useState(false);
 
   // Debug dump
   const [dumpOutput, setDumpOutput] = useState<string | null>(null);
   const [dumpRunning, setDumpRunning] = useState(false);
 
+  // Analytics consent
+  const [analyticsEnabled, setAnalyticsEnabled] = useState(() =>
+    getAnalyticsConsent(),
+  );
+
   const loadConfig = useCallback(async (): Promise<void> => {
     // Load fast config first (cached in main process)
-    const [home, aVersion, conn] = await Promise.all([
+    const [home, aVersion, conn, keyStatus] = await Promise.all([
       window.hermesAPI.getHermesHome(profile),
       window.hermesAPI.getAppVersion(),
       window.hermesAPI.getConnectionConfig(),
+      window.hermesAPI.getApiServerKeyStatus(profile),
     ]);
     setHermesHome(home);
     setAppVersion(aVersion);
     setConnMode(conn.mode);
     setConnRemoteUrl(conn.remoteUrl);
-    setConnApiKey(conn.apiKey);
+    setConnHasApiKey(conn.hasApiKey);
+    const mask = conn.hasApiKey ? makeApiKeyMask(conn.apiKeyLength) : "";
+    setConnApiKeyMask(mask);
+    setConnApiKey(mask);
     setSshHost(conn.ssh?.host || "");
     setSshPort(conn.ssh?.port ? String(conn.ssh.port) : "");
     setSshUser(conn.ssh?.username || "");
     setSshKeyPath(conn.ssh?.keyPath || "");
     setSshRemotePort(conn.ssh?.remotePort ? String(conn.ssh.remotePort) : "");
+    setApiServerKeyMissing(!keyStatus.hasKey);
     connLoaded.current = true;
 
     // Load network settings from config.yaml
@@ -130,7 +176,10 @@ function Settings({ profile }: { profile?: string }): React.JSX.Element {
       setForceIpv4(v === "true" || v === "True");
     });
     window.hermesAPI.getConfig("network.proxy", profile).then((v) => {
-      setHttpProxy(v || "");
+      const loadedProxy = v || "";
+      setHttpProxy(loadedProxy);
+      httpProxyRef.current = loadedProxy;
+      savedHttpProxyRef.current = loadedProxy.trim();
     });
 
     // Defer slow calls — background refresh, cached values show instantly
@@ -161,6 +210,32 @@ function Settings({ profile }: { profile?: string }): React.JSX.Element {
   useEffect(() => {
     void Promise.resolve().then(loadConfig);
   }, [loadConfig]);
+
+  const saveHttpProxy = useCallback(async (): Promise<void> => {
+    const trimmed = httpProxyRef.current.trim();
+    if (trimmed === savedHttpProxyRef.current) return;
+    await window.hermesAPI.setConfig("network.proxy", trimmed, profile);
+    savedHttpProxyRef.current = trimmed;
+    setNetworkSaved(true);
+    setTimeout(() => setNetworkSaved(false), 2000);
+  }, [profile]);
+
+  useEffect(() => {
+    httpProxyRef.current = httpProxy;
+  }, [httpProxy]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      void saveHttpProxy();
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [httpProxy, saveHttpProxy]);
+
+  useEffect(() => {
+    return () => {
+      void saveHttpProxy();
+    };
+  }, [saveHttpProxy]);
 
   async function handleMigrate(): Promise<void> {
     setMigrating(true);
@@ -197,6 +272,19 @@ function Settings({ profile }: { profile?: string }): React.JSX.Element {
     setMigrationDismissed(true);
   }
 
+  function getConnectionApiKeyForSave(): string | undefined {
+    // Mask sentinel in the field means "the secret is still server-side
+    // and the user hasn't touched it" — always preserve the stored key.
+    // The old code wiped the key whenever the URL changed, so a one-
+    // character URL edit (fix typo, add /v1) silently dropped the saved
+    // credential. To clear the key, the user must explicitly erase the
+    // field.
+    if (connHasApiKey && connApiKey === connApiKeyMask) {
+      return undefined;
+    }
+    return connApiKey.trim();
+  }
+
   async function handleSaveConnection(): Promise<void> {
     if (connMode === "ssh") {
       await window.hermesAPI.setSshConfig(
@@ -208,7 +296,23 @@ function Settings({ profile }: { profile?: string }): React.JSX.Element {
         18642,
       );
     } else {
-      await window.hermesAPI.setConnectionConfig(connMode, connRemoteUrl, connApiKey);
+      const apiKey = getConnectionApiKeyForSave();
+      await window.hermesAPI.setConnectionConfig(
+        connMode,
+        connRemoteUrl,
+        apiKey,
+      );
+      if (apiKey !== undefined) {
+        const hasApiKey = apiKey.length > 0;
+        setConnHasApiKey(hasApiKey);
+        if (hasApiKey) {
+          const mask = makeApiKeyMask(apiKey.length);
+          setConnApiKeyMask(mask);
+          setConnApiKey(mask);
+        } else {
+          setConnApiKeyMask("");
+        }
+      }
     }
     setConnStatus("Saved");
     setTimeout(() => setConnStatus(null), 2000);
@@ -217,7 +321,7 @@ function Settings({ profile }: { profile?: string }): React.JSX.Element {
   async function handleTestConnection(): Promise<void> {
     if (connMode === "ssh") {
       if (!sshHost.trim() || !sshUser.trim()) {
-        setConnStatus("Host and username are required");
+        setConnStatus(t("settings.sshErrorRequiredSimple"));
         return;
       }
       setConnTesting(true);
@@ -230,15 +334,21 @@ function Settings({ profile }: { profile?: string }): React.JSX.Element {
         parseInt(sshRemotePort, 10) || 8642,
       );
       setConnTesting(false);
-      setConnStatus(ok ? "SSH tunnel connected!" : "Could not connect via SSH");
+      setConnStatus(ok ? t("settings.sshSuccess") : t("settings.sshErrorFailedSimple"));
     } else {
       const url = connRemoteUrl.trim();
-      if (!url) { setConnStatus("Please enter a URL"); return; }
+      if (!url) {
+        setConnStatus(t("settings.remoteErrorRequiredSimple"));
+        return;
+      }
       setConnTesting(true);
       setConnStatus(null);
-      const ok = await window.hermesAPI.testRemoteConnection(url, connApiKey.trim());
+      const ok = await window.hermesAPI.testRemoteConnection(
+        url,
+        getConnectionApiKeyForSave(),
+      );
       setConnTesting(false);
-      setConnStatus(ok ? "Connected successfully!" : "Could not reach server");
+      setConnStatus(ok ? t("settings.remoteSuccess") : t("settings.remoteErrorFailedSimple"));
     }
   }
 
@@ -246,6 +356,8 @@ function Settings({ profile }: { profile?: string }): React.JSX.Element {
     setConnMode("local");
     setConnRemoteUrl("");
     setConnApiKey("");
+    setConnApiKeyMask("");
+    setConnHasApiKey(false);
     await window.hermesAPI.setConnectionConfig("local", "", "");
     setConnStatus(t("settings.switchedToLocal"));
     setTimeout(() => setConnStatus(null), 2000);
@@ -272,7 +384,7 @@ function Settings({ profile }: { profile?: string }): React.JSX.Element {
       if (!file) return;
       setImporting(true);
       setImportResult(null);
-      const filePath = (file as File & { path: string }).path;
+      const filePath = window.hermesAPI.getPathForFile(file);
       const result = await window.hermesAPI.runHermesImport(filePath, profile);
       setImporting(false);
       if (result.success) {
@@ -343,6 +455,8 @@ function Settings({ profile }: { profile?: string }): React.JSX.Element {
   return (
     <div className="settings-container">
       <h1 className="settings-header">{t("settings.title")}</h1>
+
+      <ConfigHealth />
 
       <div className="settings-section">
         <div className="settings-section-title">
@@ -478,22 +592,21 @@ function Settings({ profile }: { profile?: string }): React.JSX.Element {
       </div>
 
       <div className="settings-section">
-        <div className="settings-section-title">Community</div>
+        <div className="settings-section-title">{t("settings.communityTitle")}</div>
         <div className="settings-field">
           <div className="settings-field-hint" style={{ marginBottom: 10 }}>
-            Join our Telegram group to ask questions, report issues, and chat
-            with other Hermes users.
+            {t("settings.communityHint")}
           </div>
           <div className="settings-hermes-actions">
             <button
               className="btn btn-secondary"
               onClick={() =>
-                window.hermesAPI.openExternal(TELEGRAM_COMMUNITY_URL)
+                window.hermesAPI.openExternal(DISCORD_COMMUNITY_URL)
               }
-              title={TELEGRAM_COMMUNITY_URL}
+              title={DISCORD_COMMUNITY_URL}
             >
               <Send size={14} style={{ marginRight: 6 }} />
-              Join Telegram Community
+              {t("settings.joinDiscord")}
             </button>
           </div>
         </div>
@@ -533,17 +646,53 @@ function Settings({ profile }: { profile?: string }): React.JSX.Element {
               className={`settings-theme-option ${connMode === "ssh" ? "active" : ""}`}
               onClick={() => setConnMode("ssh")}
             >
-              SSH Tunnel
+              {t("settings.modeSsh")}
             </button>
           </div>
           <div className="settings-field-hint">
             {connMode === "local"
               ? t("settings.modeLocalHint")
               : connMode === "ssh"
-              ? "Tunnel to a remote Hermes over SSH — no exposed ports or API keys needed."
-              : t("settings.modeRemoteHint")}
+                ? t("settings.modeSshHint")
+                : t("settings.modeRemoteHint")}
           </div>
         </div>
+
+        {!apiServerKeyMissing ? null : connMode === "local" ? (
+          <div className="settings-api-key-banner">
+            <div className="settings-api-key-banner-title">
+              {t("settings.sessionDisabledTitle")}
+            </div>
+            <div className="settings-api-key-banner-desc">
+              {t("settings.sessionDisabledDesc")}
+            </div>
+            <button
+              className="btn btn-primary"
+              disabled={generatingKey}
+              onClick={async () => {
+                setGeneratingKey(true);
+                await window.hermesAPI.generateApiServerKey(profile);
+                setApiServerKeyMissing(false);
+                setGeneratingKey(false);
+                setConnStatus(t("settings.apiGenerated"));
+                setTimeout(() => setConnStatus(null), 4000);
+              }}
+            >
+              {generatingKey ? t("settings.generating") : t("settings.generateKey")}
+            </button>
+          </div>
+        ) : (
+          <div className="settings-api-key-banner settings-api-key-banner--info">
+            <div className="settings-api-key-banner-title">
+              {t("settings.remoteEnvTitle")}
+            </div>
+            <div className="settings-api-key-banner-desc">
+              {connMode === "ssh"
+                ? t("settings.remoteEnvSshDesc")
+                : t("settings.remoteEnvDesc")}
+            </div>
+          </div>
+        )}
 
         {connMode === "remote" && (
           <>
@@ -572,6 +721,11 @@ function Settings({ profile }: { profile?: string }): React.JSX.Element {
                 type="password"
                 value={connApiKey}
                 onChange={(e) => setConnApiKey(e.target.value)}
+                onFocus={(e) => {
+                  if (connApiKey === connApiKeyMask) {
+                    e.currentTarget.select();
+                  }
+                }}
                 placeholder={t("settings.remoteApiKey")}
                 onBlur={handleSaveConnection}
               />
@@ -585,9 +739,14 @@ function Settings({ profile }: { profile?: string }): React.JSX.Element {
                 onClick={handleTestConnection}
                 disabled={connTesting}
               >
-                {connTesting ? t("settings.testingConnection") : t("settings.testConnection")}
+                {connTesting
+                  ? t("settings.testingConnection")
+                  : t("settings.testConnection")}
               </button>
-              <button className="btn btn-primary" onClick={handleSaveConnection}>
+              <button
+                className="btn btn-primary"
+                onClick={handleSaveConnection}
+              >
                 {t("settings.save")}
               </button>
             </div>
@@ -597,17 +756,17 @@ function Settings({ profile }: { profile?: string }): React.JSX.Element {
         {connMode === "ssh" && (
           <>
             <div className="settings-field">
-              <label className="settings-field-label">SSH Host</label>
+              <label className="settings-field-label">{t("settings.sshHost")}</label>
               <input
                 className="input"
                 type="text"
                 value={sshHost}
                 onChange={(e) => setSshHost(e.target.value)}
-                placeholder="192.168.1.100 or myserver.local"
+                placeholder={t("settings.sshHostPlaceholder")}
               />
             </div>
             <div className="settings-field">
-              <label className="settings-field-label">SSH Port</label>
+              <label className="settings-field-label">{t("settings.sshPort")}</label>
               <input
                 className="input"
                 type="number"
@@ -617,19 +776,21 @@ function Settings({ profile }: { profile?: string }): React.JSX.Element {
               />
             </div>
             <div className="settings-field">
-              <label className="settings-field-label">Username</label>
+              <label className="settings-field-label">{t("settings.sshUsername")}</label>
               <input
                 className="input"
                 type="text"
                 value={sshUser}
                 onChange={(e) => setSshUser(e.target.value)}
-                placeholder="hermes"
+                placeholder={t("settings.sshUsernamePlaceholder")}
               />
             </div>
             <div className="settings-field">
               <label className="settings-field-label">
-                Private Key Path{" "}
-                <span style={{ fontWeight: 400, opacity: 0.6 }}>(optional, defaults to ~/.ssh/id_rsa)</span>
+                {t("settings.sshKeyPath")}{" "}
+                <span style={{ fontWeight: 400, opacity: 0.6 }}>
+                  {t("settings.sshKeyPathOptional")}
+                </span>
               </label>
               <input
                 className="input"
@@ -641,8 +802,10 @@ function Settings({ profile }: { profile?: string }): React.JSX.Element {
             </div>
             <div className="settings-field">
               <label className="settings-field-label">
-                Remote Hermes Port{" "}
-                <span style={{ fontWeight: 400, opacity: 0.6 }}>(default 8642)</span>
+                {t("settings.sshRemotePort")}{" "}
+                <span style={{ fontWeight: 400, opacity: 0.6 }}>
+                  {t("settings.sshRemotePortDefault")}
+                </span>
               </label>
               <input
                 className="input"
@@ -652,8 +815,7 @@ function Settings({ profile }: { profile?: string }): React.JSX.Element {
                 placeholder="8642"
               />
               <div className="settings-field-hint">
-                Make sure you can run <code style={{ fontFamily: "monospace" }}>ssh {sshUser || "user"}@{sshHost || "host"}</code> without a password prompt.
-                The first connection trusts the host key and stores it in <code style={{ fontFamily: "monospace" }}>~/.ssh/known_hosts</code>; SSH will fail closed if that key changes later.
+                {t("settings.sshHint", { cmd: `${sshUser || "user"}@${sshHost || "host"}` })}
               </div>
             </div>
             <div className="settings-hermes-actions">
@@ -662,9 +824,12 @@ function Settings({ profile }: { profile?: string }): React.JSX.Element {
                 onClick={handleTestConnection}
                 disabled={connTesting}
               >
-                {connTesting ? "Testing SSH…" : "Test SSH Connection"}
+                {connTesting ? t("settings.testingSsh") : t("settings.testSsh")}
               </button>
-              <button className="btn btn-primary" onClick={handleSaveConnection}>
+              <button
+                className="btn btn-primary"
+                onClick={handleSaveConnection}
+              >
                 {t("settings.save")}
               </button>
             </div>
@@ -736,43 +901,128 @@ function Settings({ profile }: { profile?: string }): React.JSX.Element {
           <label className="settings-field-label">
             {t("settings.theme.label")}
           </label>
-          <div className="settings-theme-options">
-            {THEME_OPTIONS.map((opt) => (
-              <button
-                key={opt.value}
-                className={`settings-theme-option ${theme === opt.value ? "active" : ""}`}
-                onClick={() => setTheme(opt.value)}
-              >
-                {opt.value === "system"
-                  ? t("settings.theme.system")
-                  : opt.value === "light"
-                    ? t("settings.theme.light")
-                    : t("settings.theme.dark")}
-              </button>
-            ))}
+          <div className="settings-theme-grid">
+            {THEMES.map((th) => {
+              const active = theme === th.id;
+              return (
+                <button
+                  key={th.id}
+                  type="button"
+                  className={`settings-theme-card ${active ? "active" : ""}`}
+                  onClick={() => setTheme(th.id)}
+                >
+                  <div className="settings-theme-preview" data-theme={th.id}>
+                    <div className="settings-theme-preview-sidebar" />
+                    <div className="settings-theme-preview-main">
+                      <div className="settings-theme-preview-bar accent" />
+                      <div className="settings-theme-preview-bar text" />
+                      <div className="settings-theme-preview-bar" />
+                    </div>
+                  </div>
+                  <div className="settings-theme-card-row">
+                    <span className="settings-theme-card-name">{th.name}</span>
+                    {active && (
+                      <span className="settings-theme-card-check">
+                        <Check size={14} />
+                      </span>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
           </div>
           <div className="settings-field-hint">
             {t("settings.appearanceHint")}
           </div>
         </div>
         <div className="settings-field">
+          <div className="settings-theme-system">
+            <div>
+              <div className="settings-theme-system-label">
+                {t("settings.roundedCorners.label")}
+              </div>
+              <div className="settings-theme-system-hint">
+                {t("settings.roundedCorners.hint")}
+              </div>
+            </div>
+            <label
+              className="tools-toggle"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <input
+                type="checkbox"
+                checked={rounded}
+                onChange={() => setRounded(!rounded)}
+              />
+              <span className="tools-toggle-track" />
+            </label>
+          </div>
+        </div>
+        <div className="settings-field">
           <label className="settings-field-label">
-            {t("settings.language.label")}
+            {t("settings.font.label")}
           </label>
           <div className="settings-theme-options">
-            {APP_LOCALES.map((supportedLocale) => (
+            {FONT_OPTIONS.map((opt) => (
               <button
-                key={supportedLocale}
-                className={`settings-theme-option ${locale === supportedLocale ? "active" : ""}`}
-                onClick={() => setLocale(supportedLocale)}
+                key={opt.value}
+                className={`settings-theme-option ${font === opt.value ? "active" : ""}`}
+                style={{ fontFamily: opt.stack }}
+                onClick={() => setFont(opt.value)}
               >
-                {t(LANGUAGE_LABEL_KEYS[supportedLocale])}
+                {t(opt.label)}
               </button>
             ))}
           </div>
+          <div className="settings-field-hint">{t("settings.font.hint")}</div>
+        </div>
+        <div className="settings-field">
+          <label className="settings-field-label">
+            {t("settings.language.label")}
+          </label>
+          <LanguageSelect locale={locale} onSelect={setLocale} />
           <div className="settings-field-hint">
             {t("settings.language.hint")}
           </div>
+        </div>
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-title">
+          {t("settings.sections.privacy")}
+        </div>
+        <div className="settings-field">
+          <label className="settings-field-label">
+            {t("settings.analytics.label")}
+            <label
+              className="tools-toggle"
+              style={{ marginLeft: 12, verticalAlign: "middle" }}
+            >
+              <input
+                type="checkbox"
+                checked={analyticsEnabled}
+                onChange={(e) => {
+                  const enabled = e.target.checked;
+                  setAnalyticsEnabled(enabled);
+                  setAnalyticsConsent(enabled);
+                }}
+              />
+              <span className="tools-toggle-track" />
+            </label>
+          </label>
+          <div className="settings-field-hint">
+            {t("settings.analytics.hint")}
+          </div>
+          <ul
+            className="settings-field-hint"
+            style={{ paddingLeft: "1.25em", marginTop: 4 }}
+          >
+            <li>{t("settings.analytics.disclosure.uuid")}</li>
+            <li>{t("settings.analytics.disclosure.platform")}</li>
+            <li>{t("settings.analytics.disclosure.navigation")}</li>
+            <li>{t("settings.analytics.disclosure.endpoint")}</li>
+            <li>{t("settings.analytics.disclosure.notCollected")}</li>
+          </ul>
         </div>
       </div>
 
@@ -822,15 +1072,19 @@ function Settings({ profile }: { profile?: string }): React.JSX.Element {
             className="input"
             type="text"
             value={httpProxy}
-            onChange={(e) => setHttpProxy(e.target.value)}
-            onBlur={async () => {
-              await window.hermesAPI.setConfig(
-                "network.proxy",
-                httpProxy.trim(),
-                profile,
-              );
-              setNetworkSaved(true);
-              setTimeout(() => setNetworkSaved(false), 2000);
+            onChange={(e) => {
+              httpProxyRef.current = e.target.value;
+              setHttpProxy(e.target.value);
+            }}
+            onBlur={() => {
+              void saveHttpProxy();
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void saveHttpProxy();
+                e.currentTarget.blur();
+              }
             }}
             placeholder={t("settings.proxyPlaceholder")}
           />
@@ -956,6 +1210,73 @@ function Settings({ profile }: { profile?: string }): React.JSX.Element {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function LanguageSelect({
+  locale,
+  onSelect,
+}: {
+  locale: AppLocale;
+  onSelect: (l: AppLocale) => void;
+}): React.JSX.Element {
+  const [isOpen, setIsOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    function handleClickOutside(e: MouseEvent): void {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setIsOpen(false);
+      }
+    }
+    function handleKey(e: KeyboardEvent): void {
+      if (e.key === "Escape") setIsOpen(false);
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [isOpen]);
+
+  return (
+    <div className="settings-language-select" ref={ref}>
+      <button
+        type="button"
+        className="settings-language-trigger"
+        onClick={() => setIsOpen((v) => !v)}
+        aria-haspopup="listbox"
+        aria-expanded={isOpen}
+      >
+        <span>{LANGUAGE_NATIVE_NAMES[locale]}</span>
+        <ChevronDown size={14} />
+      </button>
+      {isOpen && (
+        <div className="settings-language-dropdown" role="listbox">
+          {APP_LOCALES.map((l) => {
+            const active = l === locale;
+            return (
+              <button
+                key={l}
+                type="button"
+                role="option"
+                aria-selected={active}
+                className={`settings-language-option ${active ? "active" : ""}`}
+                onClick={() => {
+                  onSelect(l);
+                  setIsOpen(false);
+                }}
+              >
+                <span>{LANGUAGE_NATIVE_NAMES[l]}</span>
+                {active && <Check size={14} />}
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

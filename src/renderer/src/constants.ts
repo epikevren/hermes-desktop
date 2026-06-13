@@ -15,29 +15,91 @@ export interface SectionDef {
 // ── Providers ───────────────────────────────────────────
 
 export const PROVIDERS = {
+  // Ordered for the Providers / model-picker dropdown.  Each value must
+  // match a provider name `hermes-agent` recognises (see
+  // hermes_cli/auth.py::resolve_provider — _PROVIDER_ALIASES + PROVIDER_REGISTRY)
+  // so the gateway routes correctly when the user picks the entry.  The
+  // catch-all `custom` stays last for unlisted OpenAI-compatible endpoints.
   options: [
     { value: "auto", label: "constants.autoDetect" },
+    // Aggregators
     { value: "openrouter", label: "constants.openrouterName" },
+    { value: "aimlapi", label: "constants.aimlapiName" },
+    // First-party API providers
     { value: "anthropic", label: "constants.anthropicName" },
     { value: "openai", label: "constants.openaiName" },
+    { value: "openai-codex", label: "constants.openaiCodexName" },
+    { value: "ollama-cloud", label: "constants.ollamaCloudName" },
     { value: "google", label: "constants.googleName" },
     { value: "xai", label: "constants.xaiName" },
-    { value: "nous", label: "constants.nousName" },
+    { value: "xiaomi", label: "Xiaomi MiMo" },
+    { value: "mistral", label: "Mistral" },
+    { value: "deepseek", label: "DeepSeek" },
+    { value: "groq", label: "Groq" },
+    { value: "together", label: "Together AI" },
+    { value: "fireworks", label: "Fireworks AI" },
+    { value: "cerebras", label: "Cerebras" },
+    { value: "perplexity", label: "Perplexity" },
+    { value: "huggingface", label: "Hugging Face" },
+    { value: "nvidia", label: "NVIDIA NIM" },
+    { value: "zai", label: "Z.ai / GLM" },
     { value: "qwen", label: "Qwen" },
     { value: "minimax", label: "MiniMax" },
-    { value: "custom", label: "Local / Custom" },
+    { value: "nous", label: "constants.nousName" },
+    // Local OpenAI-compatible servers. Keep these explicit so users
+    // looking for "Ollama" or "LM Studio" do not have to discover the
+    // generic custom-provider path first.
+    { value: "lmstudio", label: "constants.lmstudio" },
+    { value: "atomicchat", label: "constants.atomicchat" },
+    { value: "ollama", label: "constants.ollama" },
+    { value: "vllm", label: "constants.vllm" },
+    { value: "llamacpp", label: "constants.llamacpp" },
+    // Subscription / OAuth plans
+    // openai-codex is listed once above (first-party group) via #102 —
+    // not repeated here to avoid a duplicate <option> value.
+    { value: "xai-oauth", label: "xAI Grok (OAuth)" },
+    { value: "qwen-oauth", label: "Qwen (OAuth)" },
+    { value: "google-gemini-cli", label: "Gemini (CLI OAuth)" },
+    { value: "minimax-oauth", label: "MiniMax (OAuth)" },
+    { value: "kimi-coding", label: "Kimi (Coding Plan)" },
+    // Catch-all for any other OpenAI-compatible endpoint or local LLM
+    { value: "custom", label: "constants.customOpenAICompatibleName" },
   ],
 
   labels: {
     openrouter: "constants.openrouterName",
+    aimlapi: "constants.aimlapiName",
     anthropic: "constants.anthropicName",
     openai: "constants.openaiName",
+    "openai-codex": "constants.openaiCodexName",
+    "ollama-cloud": "constants.ollamaCloudName",
     google: "constants.googleName",
     xai: "constants.xaiName",
-    nous: "constants.nousName",
+    xiaomi: "Xiaomi MiMo",
+    mistral: "Mistral",
+    deepseek: "DeepSeek",
+    groq: "Groq",
+    together: "Together AI",
+    fireworks: "Fireworks AI",
+    cerebras: "Cerebras",
+    perplexity: "Perplexity",
+    huggingface: "Hugging Face",
+    nvidia: "NVIDIA NIM",
+    zai: "Z.ai / GLM",
     qwen: "Qwen",
     minimax: "MiniMax",
-    custom: "Custom",
+    nous: "constants.nousName",
+    lmstudio: "constants.lmstudio",
+    atomicchat: "constants.atomicchat",
+    ollama: "constants.ollama",
+    vllm: "constants.vllm",
+    llamacpp: "constants.llamacpp",
+    "xai-oauth": "xAI Grok (OAuth)",
+    "qwen-oauth": "Qwen (OAuth)",
+    "google-gemini-cli": "Gemini (CLI OAuth)",
+    "minimax-oauth": "MiniMax (OAuth)",
+    "kimi-coding": "Kimi (Coding Plan)",
+    custom: "OpenAI Compatible / Local",
   } as Record<string, string>,
 
   setup: [
@@ -66,6 +128,18 @@ export const PROVIDERS = {
       needsKey: true,
     },
     {
+      id: "aimlapi",
+      name: "constants.aimlapiName",
+      desc: "constants.aimlapiDesc",
+      tag: "",
+      envKey: "AIMLAPI_API_KEY",
+      url: "https://aimlapi.com/app/keys",
+      placeholder: "sk-...",
+      configProvider: "aimlapi",
+      baseUrl: "https://api.aimlapi.com/v1",
+      needsKey: true,
+    },
+    {
       id: "openai",
       name: "constants.openaiName",
       desc: "constants.openaiDesc",
@@ -73,8 +147,37 @@ export const PROVIDERS = {
       envKey: "OPENAI_API_KEY",
       url: "https://platform.openai.com/api-keys",
       placeholder: "sk-...",
-      configProvider: "openai",
+      // Routed through the `custom` provider with an explicit base_url:
+      // hermes-agent's resolve_provider does not recognise a bare `openai`
+      // provider id (issue #294). The `custom` + api.openai.com path is
+      // accepted, and the OpenAI key is picked up via the known-host
+      // base-URL mapping.
+      configProvider: "custom",
+      baseUrl: "https://api.openai.com/v1",
+      needsKey: true,
+    },
+    {
+      id: "openai-codex",
+      name: "constants.openaiCodexName",
+      desc: "constants.openaiCodexDesc",
+      tag: "constants.openaiCodexTag",
+      envKey: "",
+      url: "",
+      placeholder: "",
+      configProvider: "openai-codex",
       baseUrl: "",
+      needsKey: false,
+    },
+    {
+      id: "ollama-cloud",
+      name: "constants.ollamaCloudName",
+      desc: "constants.ollamaCloudDesc",
+      tag: "constants.ollamaCloudTag",
+      envKey: "OLLAMA_API_KEY",
+      url: "https://ollama.com/settings/keys",
+      placeholder: "ollama_...",
+      configProvider: "ollama-cloud",
+      baseUrl: "https://ollama.com/v1",
       needsKey: true,
     },
     {
@@ -99,6 +202,18 @@ export const PROVIDERS = {
       placeholder: "xai-...",
       configProvider: "xai",
       baseUrl: "",
+      needsKey: true,
+    },
+    {
+      id: "xiaomi",
+      name: "Xiaomi MiMo",
+      desc: "MiMo models",
+      tag: "",
+      envKey: "XIAOMI_API_KEY",
+      url: "https://platform.xiaomimimo.com",
+      placeholder: "sk-...",
+      configProvider: "xiaomi",
+      baseUrl: "https://api.xiaomimimo.com/v1",
       needsKey: true,
     },
     {
@@ -128,6 +243,49 @@ export const PROVIDERS = {
   ],
 };
 
+// Subscription / OAuth-plan providers — these authenticate through an
+// interactive browser login (`hermes auth add <id> --type oauth`) rather
+// than a static API key. The Providers screen renders a "Sign in" card
+// for each. Values must match hermes-agent's provider registry.
+export interface OAuthProviderDef {
+  id: string;
+  name: string;
+  desc: string;
+}
+
+export const OAUTH_PROVIDERS: OAuthProviderDef[] = [
+  {
+    id: "openai-codex",
+    name: "ChatGPT (Codex Plan)",
+    desc: "providers.oauth.codexDesc",
+  },
+  {
+    id: "xai-oauth",
+    name: "xAI Grok (OAuth)",
+    desc: "providers.oauth.xaiDesc",
+  },
+  { id: "qwen-oauth", name: "Qwen (OAuth)", desc: "providers.oauth.qwenDesc" },
+  {
+    id: "google-gemini-cli",
+    name: "Gemini (CLI OAuth)",
+    desc: "providers.oauth.geminiDesc",
+  },
+  {
+    id: "minimax-oauth",
+    name: "MiniMax (OAuth)",
+    desc: "providers.oauth.minimaxDesc",
+  },
+  // Nous Portal OAuth — issue #367 Bug 2. The engine's
+  // PROVIDER_REGISTRY registers `nous` with auth_type="oauth_device_code";
+  // without this card the only way to trigger the sign-in flow was
+  // `hermes auth add nous --type oauth` from PowerShell.
+  {
+    id: "nous",
+    name: "Nous Portal (OAuth)",
+    desc: "providers.oauth.nousDesc",
+  },
+];
+
 export interface LocalPreset {
   id: string;
   name: string;
@@ -141,6 +299,12 @@ export const LOCAL_PRESETS: LocalPreset[] = [
     id: "lmstudio",
     name: "constants.lmstudio",
     baseUrl: "http://localhost:1234/v1",
+    group: "local",
+  },
+  {
+    id: "atomicchat",
+    name: "constants.atomicchat",
+    baseUrl: "http://localhost:1337/v1",
     group: "local",
   },
   {
@@ -167,6 +331,13 @@ export const LOCAL_PRESETS: LocalPreset[] = [
     baseUrl: "https://api.groq.com/openai/v1",
     group: "remote",
     envKey: "GROQ_API_KEY",
+  },
+  {
+    id: "aimlapi",
+    name: "constants.aimlapi",
+    baseUrl: "https://api.aimlapi.com/v1",
+    group: "remote",
+    envKey: "AIMLAPI_API_KEY",
   },
   {
     id: "deepseek",
@@ -197,6 +368,13 @@ export const LOCAL_PRESETS: LocalPreset[] = [
     envKey: "CEREBRAS_API_KEY",
   },
   {
+    id: "atlascloud",
+    name: "constants.atlascloud",
+    baseUrl: "https://api.atlascloud.ai/v1",
+    group: "remote",
+    envKey: "ATLASCLOUD_API_KEY",
+  },
+  {
     id: "mistral",
     name: "constants.mistral",
     baseUrl: "https://api.mistral.ai/v1",
@@ -207,13 +385,82 @@ export const LOCAL_PRESETS: LocalPreset[] = [
 
 // ── Theme ───────────────────────────────────────────────
 
-export const THEME_OPTIONS = [
-  { value: "system" as const, label: "constants.themeSystem" },
-  { value: "light" as const, label: "constants.themeLight" },
-  { value: "dark" as const, label: "constants.themeDark" },
+export type ThemeAppearance = "dark" | "light";
+
+export interface ThemeDef {
+  /** Value written to localStorage and the `data-theme` attribute. */
+  id: string;
+  /** Display name shown in the picker (proper names are not translated). */
+  name: string;
+  /** Whether the palette is dark or light (drives the "System" fallback). */
+  appearance: ThemeAppearance;
+}
+
+/**
+ * Registry of selectable themes. Each entry must have a matching
+ * `[data-theme="<id>"]` block in `assets/main.css`. To add a theme, append an
+ * entry here and define its CSS variables there — nothing else is required.
+ */
+export const THEMES: ThemeDef[] = [
+  { id: "dark", name: "Dark", appearance: "dark" },
+  { id: "light", name: "Light", appearance: "light" },
+  { id: "dracula", name: "Dracula", appearance: "dark" },
+  { id: "nord", name: "Nord", appearance: "dark" },
+  { id: "one-dark", name: "One Dark", appearance: "dark" },
+  { id: "github-dark", name: "GitHub Dark", appearance: "dark" },
+  { id: "monokai", name: "Monokai", appearance: "dark" },
+  { id: "solarized-dark", name: "Solarized Dark", appearance: "dark" },
+  { id: "gruvbox-dark", name: "Gruvbox Dark", appearance: "dark" },
+  { id: "tokyo-night", name: "Tokyo Night", appearance: "dark" },
+  { id: "github-light", name: "GitHub Light", appearance: "light" },
+  { id: "solarized-light", name: "Solarized Light", appearance: "light" },
 ];
 
+/**
+ * Legacy options retained for older callers/tests that only distinguish between
+ * OS-following, light, and dark modes. New theme pickers should use THEMES.
+ */
+export const THEME_OPTIONS = [
+  { value: "system", label: "System" },
+  { value: "light", label: "Light" },
+  { value: "dark", label: "Dark" },
+];
+
+/** Themes used by the "System" setting when following the OS preference. */
+export const DEFAULT_DARK_THEME = "dark";
+export const DEFAULT_LIGHT_THEME = "light";
+
 export const THEME_STORAGE_KEY = "hermes-theme";
+
+// ── Font ────────────────────────────────────────────────
+
+// Each option maps to a full font-family stack assigned to `--font-sans`.
+// "manrope" is the bundled default; the rest fall back to OS-installed
+// families with a sane sans-serif chain so something always renders.
+export interface FontOption {
+  value: string;
+  label: string;
+  stack: string;
+}
+
+export const FONT_OPTIONS: FontOption[] = [
+  {
+    value: "manrope",
+    label: "settings.font.manrope",
+    stack:
+      '"Manrope", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+  },
+  {
+    value: "system",
+    label: "settings.font.system",
+    stack:
+      '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Ubuntu, Cantarell, "Helvetica Neue", sans-serif',
+  },
+];
+
+export const DEFAULT_FONT = "manrope";
+
+export const FONT_STORAGE_KEY = "hermes-font";
 
 // ── Settings API Key Sections ───────────────────────────
 
@@ -232,6 +479,18 @@ export const SETTINGS_SECTIONS: SectionDef[] = [
         label: "constants.openaiApiKey",
         type: "password",
         hint: "constants.openaiHint",
+      },
+      {
+        key: "OLLAMA_API_KEY",
+        label: "constants.ollamaCloudApiKey",
+        type: "password",
+        hint: "constants.ollamaCloudHint",
+      },
+      {
+        key: "AIMLAPI_API_KEY",
+        label: "constants.aimlapiApiKey",
+        type: "password",
+        hint: "constants.aimlapiHint",
       },
       {
         key: "ANTHROPIC_API_KEY",
@@ -262,6 +521,15 @@ export const SETTINGS_SECTIONS: SectionDef[] = [
         label: "constants.minimaxApiKey",
         type: "password",
         hint: "constants.minimaxHint",
+      },
+      // Nous Portal API-key variant — the OAuth variant has its own
+      // card in the OAuth section below. Missing-API-key-card was
+      // issue #367 Bug 1.
+      {
+        key: "NOUS_API_KEY",
+        label: "constants.nousApiKey",
+        type: "password",
+        hint: "constants.nousHint",
       },
       {
         key: "MINIMAX_CN_API_KEY",
@@ -312,6 +580,12 @@ export const SETTINGS_SECTIONS: SectionDef[] = [
         hint: "constants.cerebrasHint",
       },
       {
+        key: "ATLASCLOUD_API_KEY",
+        label: "constants.atlascloudApiKey",
+        type: "password",
+        hint: "constants.atlascloudHint",
+      },
+      {
         key: "MISTRAL_API_KEY",
         label: "constants.mistralApiKey",
         type: "password",
@@ -322,6 +596,12 @@ export const SETTINGS_SECTIONS: SectionDef[] = [
         label: "constants.perplexityApiKey",
         type: "password",
         hint: "constants.perplexityHint",
+      },
+      {
+        key: "NVIDIA_API_KEY",
+        label: "constants.nvidiaApiKey",
+        type: "password",
+        hint: "constants.nvidiaHint",
       },
       {
         key: "CUSTOM_API_KEY",
@@ -340,6 +620,12 @@ export const SETTINGS_SECTIONS: SectionDef[] = [
         label: "constants.xaiApiKey",
         type: "password",
         hint: "constants.xaiHint",
+      },
+      {
+        key: "XIAOMI_API_KEY",
+        label: "constants.xiaomiApiKey",
+        type: "password",
+        hint: "constants.xiaomiHint",
       },
     ],
   },
@@ -636,13 +922,13 @@ export const GATEWAY_SECTIONS: SectionDef[] = [
         hint: "constants.webhookHint",
       },
       {
-        key: "HA_URL",
+        key: "HASS_URL",
         label: "constants.haUrl",
         type: "text",
         hint: "constants.haUrlHint",
       },
       {
-        key: "HA_TOKEN",
+        key: "HASS_TOKEN",
         label: "constants.haToken",
         type: "password",
         hint: "constants.haTokenHint",
@@ -763,7 +1049,7 @@ export const GATEWAY_PLATFORMS: PlatformDef[] = [
     key: "home_assistant",
     label: "constants.platformHomeAssistant",
     description: "constants.platformHomeAssistantDesc",
-    fields: ["HA_URL", "HA_TOKEN"],
+    fields: ["HASS_URL", "HASS_TOKEN"],
   },
 ];
 

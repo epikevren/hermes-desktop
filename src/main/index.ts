@@ -6,15 +6,37 @@ import {
   Menu,
   Notification,
   dialog,
+  clipboard,
+  session,
 } from "electron";
-import { join } from "path";
+import { join, extname } from "path";
+import { randomUUID } from "crypto";
+import { readdir, readFile, stat } from "fs/promises";
 import { electronApp, optimizer, is } from "@electron-toolkit/utils";
 import type { AppUpdater } from "electron-updater";
 import icon from "../../resources/icon.png?asset";
+import type { Attachment } from "../shared/attachments";
+import { stageAttachment, clearStagedAttachments } from "./attachment-staging";
+import { persistPromptImageAttachments } from "./session-attachment-store";
+import {
+  discoverProviderModels,
+  getModelContextWindow,
+} from "./model-discovery";
+import {
+  cleanupTempMediaFiles,
+  materializeDataUrlToTemp,
+  readMediaAsDataUrl,
+  saveMedia,
+  mediaFileExists,
+} from "./media";
+import { openTerminalInDirectory } from "./terminal-launcher";
 import {
   checkInstallStatus,
   verifyInstall,
   runInstall,
+  inspectInstallTarget,
+  validateHermesHome,
+  setHermesHomeOverride,
   getHermesVersion,
   clearVersionCache,
   runHermesDoctor,
@@ -24,23 +46,43 @@ import {
   runHermesBackup,
   runHermesImport,
   runHermesDump,
-  listMcpServers,
   discoverMemoryProviders,
   readLogs,
   InstallProgress,
 } from "./installer";
 import {
+  addMcpServer,
+  installMcpCatalogEntry,
+  listMcpCatalog,
+  listMcpServers,
+  removeMcpServer,
+  setMcpServerEnabled,
+  testMcpServer,
+  type McpServerInput,
+} from "./mcp-servers";
+import { updaterLogger } from "./updater-log";
+import {
+  runHermesAuthLogin,
+  cancelHermesAuthLogin,
+  detectDeviceCode,
+} from "./hermes-auth";
+import {
   isRemoteMode,
   isRemoteOnlyMode,
   sendMessage,
+  transcribeAudio,
   startGateway,
+  startGatewayDetailed,
   stopGateway,
   isGatewayRunning,
   testRemoteConnection,
   stopHealthPolling,
   restartGateway,
+  notifyProfileSwitched,
   ensureSshTunnelIfNeeded,
   setSshRemoteApiKey,
+  getRemoteAuthHeader,
+  resolvePendingClarify,
 } from "./hermes";
 import {
   startSshTunnel,
@@ -63,8 +105,10 @@ import {
   getClaw3dPort,
   setClaw3dWsUrl,
   getClaw3dWsUrl,
+  waitForClaw3dReady,
   Claw3dSetupProgress,
 } from "./claw3d";
+import { startOfficeStack } from "./office-start";
 import {
   readEnv,
   setEnvValue,
@@ -75,24 +119,52 @@ import {
   setModelConfig,
   getCredentialPool,
   setCredentialPool,
+  addCredentialPoolEntry,
   getConnectionConfig,
+  getPublicConnectionConfig,
+  resolveConnectionApiKeyUpdate,
   setConnectionConfig,
   getPlatformEnabled,
   setPlatformEnabled,
+  getApiServerKeyStatus,
+  invalidateSecretsCache,
 } from "./config";
-import { listSessions, getSessionMessages, searchSessions } from "./sessions";
+import {
+  getAuxiliaryConfig,
+  setAuxiliaryTask,
+  resetAuxiliaryToAuto,
+} from "./auxiliary-config";
+import {
+  listSessions,
+  getSessionMessages,
+  searchSessions,
+  deleteSession,
+  deleteSessions,
+} from "./sessions";
 import {
   syncSessionCache,
   listCachedSessions,
   updateSessionTitle,
 } from "./session-cache";
 import { listModels, addModel, removeModel, updateModel } from "./models";
+import { validateChatReadiness } from "./validation";
+import {
+  runConfigHealthCheck,
+  autoFixIssue,
+  readConfigFixLog,
+  type IssueCode,
+} from "./config-health";
 import {
   listProfiles,
   createProfile,
   deleteProfile,
   setActiveProfile,
 } from "./profiles";
+import {
+  setProfileColor,
+  setProfileAvatar,
+  removeProfileAvatar,
+} from "./profile-meta";
 import {
   readMemory,
   addMemoryEntry,
@@ -101,7 +173,21 @@ import {
   writeUserProfile,
 } from "./memory";
 import { readSoul, writeSoul, resetSoul } from "./soul";
-import { getToolsets, setToolsetEnabled } from "./tools";
+import {
+  getPlatformToolsets,
+  getToolsets,
+  setMessagingPlatformToolsetEnabled,
+  setToolsetEnabled,
+} from "./tools";
+import {
+  fetchRegistry,
+  fetchModelRegistry,
+  fetchRegistryDetail,
+  listInstalledRegistry,
+  installRegistryItem,
+  type RegistryKind,
+  type RegistryItem,
+} from "./registry";
 import {
   listInstalledSkills,
   listBundledSkills,
@@ -117,6 +203,15 @@ import {
   resumeCronJob,
   triggerCronJob,
 } from "./cronjobs";
+import {
+  applyMessagingPlatformUpdate,
+  buildDesktopMessagingPlatforms,
+  fetchRemoteMessagingPlatforms,
+  readLocalGatewayPlatformStates,
+  testDesktopMessagingPlatform,
+  testRemoteMessagingPlatform,
+  updateRemoteMessagingPlatform,
+} from "./messaging-platforms";
 import {
   listBoards as kanbanListBoards,
   currentBoard as kanbanCurrentBoard,
@@ -135,6 +230,7 @@ import {
   reclaimTask as kanbanReclaimTask,
   commentTask as kanbanCommentTask,
   dispatchOnce as kanbanDispatchOnce,
+  listClaw3dHqTasks as kanbanListClaw3dHqTasks,
   CreateTaskInput,
 } from "./kanban";
 import { getAppLocale, setAppLocale } from "./locale";
@@ -161,7 +257,9 @@ import {
   sshWriteSoul,
   sshResetSoul,
   sshGetToolsets,
+  sshGetPlatformToolsets,
   sshSetToolsetEnabled,
+  sshSetMessagingPlatformToolsetEnabled,
   sshReadEnv,
   sshSetEnvValue,
   sshGetConfigValue,
@@ -186,10 +284,20 @@ import {
   sshListCachedSessions,
   sshRunDoctor,
   sshListModels,
+  sshAddModel,
+  sshRemoveModel,
+  sshUpdateModel,
   sshRunUpdate,
   sshRunDump,
   sshDiscoverMemoryProviders,
 } from "./ssh-remote";
+import { applyGpuPreferences, installGpuCrashGuard } from "./gpu-fallback";
+
+// Disable hardware acceleration up front if a prior launch detected a fatal
+// GPU crash (or the user forced it). MUST run before app is ready. See
+// gpu-fallback.ts / issue #592.
+applyGpuPreferences();
+installGpuCrashGuard();
 
 process.on("uncaughtException", (err) => {
   console.error("[MAIN UNCAUGHT]", err);
@@ -200,7 +308,10 @@ process.on("unhandledRejection", (reason) => {
 });
 
 let mainWindow: BrowserWindow | null = null;
-let currentChatAbort: (() => void) | null = null;
+// Per-run abort handles, keyed by the renderer-minted runId. Multiple chats
+// run concurrently (background sessions / multi-agent), so starting a new run
+// must not abort siblings — only a re-send under the same runId does.
+const activeRuns = new Map<string, () => void>();
 
 function openExternalUrl(rawUrl: unknown): void {
   if (!isAllowedExternalUrl(rawUrl)) {
@@ -220,7 +331,12 @@ function createWindow(): void {
     width: 1100,
     height: 850,
     minWidth: 900,
-    minHeight: 820,
+    // Lowered from 820 to fit on 768p / 720p displays — Linux WMs
+    // enforce minHeight strictly, clipping content (chat input, bottom
+    // nav items) below the screen edge on 1366×768 laptops. Issue #393.
+    // Companion CSS change makes .sidebar-nav scrollable when content
+    // exceeds available vertical space.
+    minHeight: 600,
     show: false,
     autoHideMenuBar: true,
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : undefined,
@@ -300,6 +416,53 @@ function createWindow(): void {
     },
   );
 
+  // Right-click context menu (issue #298): native Cut/Copy/Paste/Select All
+  // via Electron roles — they act on the focused field / selection and work
+  // across the whole app — plus two items to copy the whole conversation.
+  mainWindow.webContents.on("context-menu", (_event, params) => {
+    const { editFlags, isEditable } = params;
+    const template: Electron.MenuItemConstructorOptions[] = [];
+    if (isEditable) {
+      template.push(
+        { role: "cut", enabled: editFlags.canCut },
+        { role: "copy", enabled: editFlags.canCopy },
+        { role: "paste", enabled: editFlags.canPaste },
+        { type: "separator" },
+        // The selectAll role scopes correctly to the focused input field.
+        { role: "selectAll" },
+      );
+    } else {
+      template.push(
+        { role: "copy", enabled: editFlags.canCopy },
+        { type: "separator" },
+        // The selectAll role would select the entire window for non-editable
+        // content — scope it to the message bubble under the cursor instead.
+        {
+          label: "Select All",
+          click: () =>
+            mainWindow?.webContents.send("context-menu-select-bubble", {
+              x: params.x,
+              y: params.y,
+            }),
+        },
+      );
+    }
+    template.push(
+      { type: "separator" },
+      {
+        label: "Copy entire chat (text)",
+        click: () =>
+          mainWindow?.webContents.send("context-menu-copy-chat", "text"),
+      },
+      {
+        label: "Copy entire chat (Markdown)",
+        click: () =>
+          mainWindow?.webContents.send("context-menu-copy-chat", "markdown"),
+      },
+    );
+    Menu.buildFromTemplate(template).popup();
+  });
+
   if (is.dev && process.env["ELECTRON_RENDERER_URL"]) {
     mainWindow.loadURL(process.env["ELECTRON_RENDERER_URL"]);
   } else {
@@ -325,6 +488,22 @@ function setupIPC(): void {
       return { success: false, error: (err as Error).message };
     }
   });
+
+  // Pre-install inspection + "use an existing installation" (issue #272).
+  ipcMain.handle("inspect-install-target", () => inspectInstallTarget());
+  ipcMain.handle("validate-hermes-home", (_event, dir: string) =>
+    validateHermesHome(dir),
+  );
+  ipcMain.handle("adopt-hermes-home", (_event, dir: string) => {
+    if (!validateHermesHome(dir)) return false;
+    // Persist the choice only. HERMES_HOME is resolved once at module
+    // load, so the override takes effect on the next launch — the renderer
+    // asks the user to restart. (An app-driven relaunch is unreliable
+    // under the dev server, which is torn down with the process.)
+    setHermesHomeOverride(dir);
+    return true;
+  });
+  ipcMain.handle("quit-app", () => app.quit());
 
   // Hermes engine info
   ipcMain.handle("get-hermes-version", async () => {
@@ -383,6 +562,39 @@ function setupIPC(): void {
     }
   });
 
+  // OAuth provider sign-in — spawns `hermes auth add <provider> --type
+  // oauth`, streaming the CLI's output to the renderer's sign-in modal.
+  ipcMain.handle("oauth-login", (event, provider: string, profile?: string) => {
+    // Codex uses a device-code flow: it prints a URL + code instead
+    // of opening a browser. Watch the stream for that prompt, then
+    // open the page and pre-copy the code so the user just pastes.
+    let buffer = "";
+    let deviceHandled = false;
+    return runHermesAuthLogin(
+      provider,
+      (chunk) => {
+        // The user can close the modal mid-flow before cancelHermesAuthLogin
+        // tears down the subprocess; any send on a destroyed sender throws.
+        if (event.sender.isDestroyed()) return;
+        event.sender.send("oauth-login-progress", chunk);
+        if (deviceHandled) return;
+        buffer += chunk;
+        const device = detectDeviceCode(buffer);
+        if (device) {
+          deviceHandled = true;
+          openExternalUrl(device.url);
+          clipboard.writeText(device.code);
+          event.sender.send(
+            "oauth-login-progress",
+            `\n→ Code ${device.code} copied to clipboard — opening browser...\n`,
+          );
+        }
+      },
+      profile,
+    );
+  });
+  ipcMain.handle("oauth-login-cancel", () => cancelHermesAuthLogin());
+
   // Configuration (profile-aware)
   ipcMain.handle("get-locale", () => getAppLocale());
   ipcMain.handle("set-locale", (_event, locale: AppLocale) =>
@@ -395,6 +607,41 @@ function setupIPC(): void {
     return readEnv(profile);
   });
 
+  // Pre-send chat readiness — answers "if Send is clicked right now,
+  // will it work?". Fail-open semantics: any uncertain state returns
+  // `ok: true`, so the renderer never false-blocks a Send.
+  ipcMain.handle("validate-chat-readiness", (_event, profile?: string) => {
+    return validateChatReadiness(profile);
+  });
+
+  // Config-health audit + per-issue auto-fix. The renderer renders a
+  // dismissible banner above the chat input and a full report in the
+  // Settings → Diagnose section. Auto-fixes are additive only — never
+  // delete; always log to ~/.hermes/logs/config-fixes.log.
+  ipcMain.handle("get-config-health", (_event, profile?: string) => {
+    return runConfigHealthCheck(profile);
+  });
+
+  ipcMain.handle("rerun-config-health", (_event, profile?: string) => {
+    return runConfigHealthCheck(profile);
+  });
+
+  ipcMain.handle(
+    "autofix-config-issue",
+    (
+      _event,
+      code: IssueCode,
+      profile?: string,
+      context?: Record<string, string>,
+    ) => {
+      return autoFixIssue(code, profile, context);
+    },
+  );
+
+  ipcMain.handle("get-config-fix-log", (_event, maxEntries?: number) => {
+    return readConfigFixLog(maxEntries);
+  });
+
   ipcMain.handle(
     "set-env",
     async (_event, key: string, value: string, profile?: string) => {
@@ -404,12 +651,19 @@ function setupIPC(): void {
         return true;
       }
       setEnvValue(key, value, profile);
-      // Restart gateway so it picks up the new API key
-      if (
-        (isGatewayRunning() && key.endsWith("_API_KEY")) ||
+      // Restart gateway so it picks up the new API key.
+      // The earlier condition had a precedence bug —
+      //   `(isGatewayRunning() && _API_KEY) || _TOKEN || HF_TOKEN`
+      // — that triggered a restart for `_TOKEN`/`HF_TOKEN` writes even
+      // when no local gateway was running, which in remote mode hit the
+      // `startGateway` path with no local install (issue #266).
+      // restartGateway() now also self-gates on isRemoteMode(), so this
+      // is belt-and-braces, but the condition is fixed too for clarity.
+      const looksLikeCredential =
+        key.endsWith("_API_KEY") ||
         key.endsWith("_TOKEN") ||
-        key === "HF_TOKEN"
-      ) {
+        key === "HF_TOKEN";
+      if (isGatewayRunning(profile) && looksLikeCredential) {
         restartGateway(profile);
       }
       return true;
@@ -418,7 +672,8 @@ function setupIPC(): void {
 
   ipcMain.handle("get-config", (_event, key: string, profile?: string) => {
     const conn = getConnectionConfig();
-    if (conn.mode === "ssh" && conn.ssh) return sshGetConfigValue(conn.ssh, key, profile);
+    if (conn.mode === "ssh" && conn.ssh)
+      return sshGetConfigValue(conn.ssh, key, profile);
     return getConfigValue(key, profile);
   });
 
@@ -437,13 +692,15 @@ function setupIPC(): void {
 
   ipcMain.handle("get-hermes-home", (_event, profile?: string) => {
     const conn = getConnectionConfig();
-    if (conn.mode === "ssh" && conn.ssh) return sshGetHermesHome(conn.ssh, profile);
+    if (conn.mode === "ssh" && conn.ssh)
+      return sshGetHermesHome(conn.ssh, profile);
     return getHermesHome(profile);
   });
 
   ipcMain.handle("get-model-config", (_event, profile?: string) => {
     const conn = getConnectionConfig();
-    if (conn.mode === "ssh" && conn.ssh) return sshGetModelConfig(conn.ssh, profile);
+    if (conn.mode === "ssh" && conn.ssh)
+      return sshGetModelConfig(conn.ssh, profile);
     return getModelConfig(profile);
   });
 
@@ -461,7 +718,7 @@ function setupIPC(): void {
         const prev = await sshGetModelConfig(conn.ssh, profile);
         await sshSetModelConfig(conn.ssh, provider, model, baseUrl, profile);
         if (
-          await sshGatewayStatus(conn.ssh) &&
+          (await sshGatewayStatus(conn.ssh)) &&
           (prev.provider !== provider ||
             prev.model !== model ||
             prev.baseUrl !== baseUrl)
@@ -476,7 +733,7 @@ function setupIPC(): void {
 
       // Restart gateway when provider, model, or endpoint changes so it picks up new config
       if (
-        isGatewayRunning() &&
+        isGatewayRunning(profile) &&
         (prev.provider !== provider ||
           prev.model !== model ||
           prev.baseUrl !== baseUrl)
@@ -488,20 +745,118 @@ function setupIPC(): void {
     },
   );
 
+  // Auxiliary (side-task) model routing
+  ipcMain.handle("get-auxiliary-config", (_event, profile?: string) => {
+    const conn = getConnectionConfig();
+    if (conn.mode === "ssh" && conn.ssh) {
+      // TODO: SSH path for auxiliary config (requires sshGetAuxiliaryConfig)
+      return [];
+    }
+    return getAuxiliaryConfig(profile);
+  });
+
+  ipcMain.handle(
+    "set-auxiliary-task",
+    async (
+      _event,
+      task: string,
+      cfg: { provider: string; model: string; baseUrl: string },
+      profile?: string,
+    ) => {
+      const conn = getConnectionConfig();
+      if (conn.mode === "ssh" && conn.ssh) {
+        // TODO: SSH path for auxiliary config (requires sshSetAuxiliaryTask)
+        return false;
+      }
+      setAuxiliaryTask(task, cfg, profile);
+
+      // Restart gateway so it picks up the new auxiliary config
+      if (isGatewayRunning(profile)) {
+        restartGateway(profile);
+      }
+
+      return true;
+    },
+  );
+
+  ipcMain.handle("reset-auxiliary-config", async (_event, profile?: string) => {
+    const conn = getConnectionConfig();
+    if (conn.mode === "ssh" && conn.ssh) {
+      // TODO: SSH path for auxiliary config (requires sshResetAuxiliaryConfig)
+      return false;
+    }
+    resetAuxiliaryToAuto(profile);
+
+    // Restart gateway so it picks up the reset
+    if (isGatewayRunning(profile)) {
+      restartGateway(profile);
+    }
+
+    return true;
+  });
+
+  // API_SERVER_KEY management — lets the renderer detect a missing key and
+  // generate one with a button click (local mode) or show instructions (remote/SSH).
+  // Additive shape: `hasKey` stays the required primary field; `providerId` /
+  // `checkedAt` are optional extras for a follow-up Settings/Gateway UI.
+  ipcMain.handle("get-api-server-key-status", (_event, profile?: string) =>
+    getApiServerKeyStatus(profile),
+  );
+
+  // Drops the cached secrets-provider values so the next status check re-reads
+  // the vault — lets the renderer's "Refresh from vault" button take effect
+  // immediately instead of waiting out the cache TTL.
+  ipcMain.handle("invalidate-secrets-cache", () => {
+    invalidateSecretsCache();
+  });
+
+  ipcMain.handle(
+    "generate-api-server-key",
+    async (_event, profile?: string) => {
+      const { randomUUID } = await import("crypto");
+      const key = `desk-${randomUUID()}`;
+      // Write to both the active profile .env and the default .env so the
+      // gateway (which reads the profile .env) and the desktop (which reads
+      // the default .env as fallback) both see the same key.
+      setEnvValue("API_SERVER_KEY", key, profile);
+      if (profile && profile !== "default") {
+        setEnvValue("API_SERVER_KEY", key);
+      }
+      // Restart gateway so it picks up the new key immediately.
+      if (isGatewayRunning(profile)) {
+        stopGateway(profile, true);
+        await new Promise<void>((r) => setTimeout(r, 800));
+        startGateway(profile);
+      }
+      return { key };
+    },
+  );
+
   // Connection mode (local / remote / ssh)
   ipcMain.handle("is-remote-mode", () => isRemoteMode());
   ipcMain.handle("is-remote-only-mode", () => isRemoteOnlyMode());
-  ipcMain.handle("get-connection-config", () => getConnectionConfig());
+  ipcMain.handle("get-connection-config", () => getPublicConnectionConfig());
   ipcMain.handle("is-ssh-tunnel-active", () => isSshTunnelActive());
 
   ipcMain.handle(
     "set-connection-config",
-    (_event, mode: "local" | "remote" | "ssh", remoteUrl: string, apiKey?: string) => {
+    (
+      _event,
+      mode: "local" | "remote" | "ssh",
+      remoteUrl: string,
+      apiKey?: string,
+    ) => {
+      const existing = getConnectionConfig();
       setConnectionConfig({
+        ...existing,
         mode,
         remoteUrl,
-        apiKey: apiKey || "",
-        ssh: getConnectionConfig().ssh, // preserve existing ssh config
+        apiKey: resolveConnectionApiKeyUpdate(
+          existing,
+          mode,
+          remoteUrl,
+          apiKey,
+        ),
       });
       return true;
     },
@@ -535,14 +890,28 @@ function setupIPC(): void {
 
   ipcMain.handle(
     "test-ssh-connection",
-    (_event, host: string, port: number, username: string, keyPath: string, remotePort: number) =>
-      testSshConnection({ host, port, username, keyPath, remotePort, localPort: 19642 }),
+    (
+      _event,
+      host: string,
+      port: number,
+      username: string,
+      keyPath: string,
+      remotePort: number,
+    ) =>
+      testSshConnection({
+        host,
+        port,
+        username,
+        keyPath,
+        remotePort,
+        localPort: 19642,
+      }),
   );
 
   ipcMain.handle("start-ssh-tunnel", async () => {
     const conn = getConnectionConfig();
     if (conn.mode !== "ssh") return false;
-    if (conn.ssh && !await sshGatewayStatus(conn.ssh)) {
+    if (conn.ssh && !(await sshGatewayStatus(conn.ssh))) {
       await sshStartGateway(conn.ssh);
     }
     await startSshTunnel(conn.ssh);
@@ -561,6 +930,16 @@ function setupIPC(): void {
 
   // Chat — lazy-start gateway on first message
   ipcMain.handle(
+    "transcribe-audio",
+    async (
+      _event,
+      audio: Uint8Array,
+      mimeType: string,
+      profile?: string,
+    ): Promise<string> => transcribeAudio(audio, mimeType, profile),
+  );
+
+  ipcMain.handle(
     "send-message",
     async (
       event,
@@ -568,8 +947,14 @@ function setupIPC(): void {
       profile?: string,
       resumeSessionId?: string,
       history?: Array<{ role: string; content: string }>,
+      attachments?: Attachment[],
+      contextFolder?: string,
+      runId?: string,
     ) => {
-      if (!isRemoteMode() && !isGatewayRunning()) {
+      // Each conversation has a stable runId minted by the renderer. Fall back
+      // to a generated id for legacy callers so the run is still tracked.
+      const chatRunId = runId || `run-${randomUUID()}`;
+      if (!isRemoteMode() && !isGatewayRunning(profile)) {
         startGateway(profile);
       }
 
@@ -581,14 +966,20 @@ function setupIPC(): void {
         if (!gatewayRunning || !tunnelHealthy) {
           await sshStartGateway(conn.ssh);
           await startSshTunnel(conn.ssh);
+        }
+        // Always ensure the API key is cached — the key may not have been
+        // read yet if the app-launch auto-start failed silently (#212).
+        if (!getRemoteAuthHeader().Authorization) {
           const key = await sshReadRemoteApiKey(conn.ssh);
           setSshRemoteApiKey(key);
         }
       }
 
-      if (currentChatAbort) {
-        currentChatAbort();
-      }
+      // Abort only a prior run under the SAME runId (a re-send in the same
+      // conversation). Sibling runs — other background sessions / agents —
+      // keep streaming untouched.
+      const existing = activeRuns.get(chatRunId);
+      if (existing) existing();
 
       let fullResponse = "";
       const chatStartTime = Date.now();
@@ -601,16 +992,57 @@ function setupIPC(): void {
         },
       );
 
+      // Streaming sends to `event.sender` will throw "Object has been
+      // destroyed" if the renderer WebContents goes away mid-response
+      // (window closed, reloaded, navigated away). Guard every send so a
+      // dead sender doesn't crash the IPC handler, and abort the in-flight
+      // chat the first time we see one — there's nobody listening anymore.
+      // Every event carries the runId as its first arg so the renderer can
+      // route it to the right conversation among several running at once.
+      const safeSend = (channel: string, payload: unknown): boolean => {
+        if (event.sender.isDestroyed()) return false;
+        try {
+          event.sender.send(channel, chatRunId, payload);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      const abortThisRun = (): void => {
+        activeRuns.get(chatRunId)?.();
+      };
+
       const handle = await sendMessage(
         message,
         {
           onChunk: (chunk) => {
             fullResponse += chunk;
-            event.sender.send("chat-chunk", chunk);
+            if (!safeSend("chat-chunk", chunk)) {
+              // Renderer is gone — stop generating and resolve with what we
+              // have so the awaiting promise doesn't leak.
+              abortThisRun();
+            }
+          },
+          onReasoningChunk: (chunk) => {
+            // Forward reasoning/thinking tokens on a dedicated channel so
+            // the renderer can render the thinking bubble live during the
+            // stream rather than waiting for a focus-change refresh (#352).
+            // Same renderer-gone abort guard as the content channel.
+            if (!safeSend("chat-reasoning-chunk", chunk)) {
+              abortThisRun();
+            }
           },
           onDone: (sessionId) => {
-            currentChatAbort = null;
-            event.sender.send("chat-done", sessionId || "");
+            activeRuns.delete(chatRunId);
+            try {
+              persistPromptImageAttachments(sessionId, message, attachments);
+            } catch (err) {
+              console.warn(
+                "[sessions] Failed to persist prompt image attachments:",
+                err,
+              );
+            }
+            safeSend("chat-done", sessionId || "");
             resolveChat({ response: fullResponse, sessionId });
             // Desktop notification when window is not focused and response took >10s
             if (
@@ -623,58 +1055,224 @@ function setupIPC(): void {
                 .trim()
                 .slice(0, 80);
               new Notification({
-                title: "Hermes Agent",
+                title: "Hermes One",
                 body: preview || "Response ready",
               }).show();
             }
           },
           onError: (error) => {
-            currentChatAbort = null;
-            event.sender.send("chat-error", error);
+            activeRuns.delete(chatRunId);
+            safeSend("chat-error", error);
             rejectChat(new Error(error));
             // Notify on error too if window not focused
             if (mainWindow && !mainWindow.isFocused()) {
               new Notification({
-                title: "Hermes Agent — Error",
+                title: "Hermes One — Error",
                 body: error.slice(0, 100),
               }).show();
             }
           },
           onToolProgress: (tool) => {
-            event.sender.send("chat-tool-progress", tool);
+            safeSend("chat-tool-progress", tool);
+          },
+          onToolEvent: (toolEvent) => {
+            safeSend("chat-tool-event", toolEvent);
           },
           onUsage: (usage) => {
-            event.sender.send("chat-usage", usage);
+            safeSend("chat-usage", usage);
+          },
+          onClarify: (req) => {
+            safeSend("chat-clarify-request", req);
           },
         },
         profile,
         resumeSessionId,
         history,
+        attachments,
+        contextFolder,
       );
 
-      currentChatAbort = handle.abort;
+      activeRuns.set(chatRunId, handle.abort);
       return promise;
     },
   );
 
-  ipcMain.handle("abort-chat", () => {
-    if (currentChatAbort) {
-      currentChatAbort();
-      currentChatAbort = null;
+  ipcMain.handle("abort-chat", (_event, runId?: string) => {
+    // Abort one run when given its id; with no id (legacy callers) abort all.
+    if (runId) {
+      activeRuns.get(runId)?.();
+      activeRuns.delete(runId);
+      return;
     }
+    for (const abort of activeRuns.values()) abort();
+    activeRuns.clear();
   });
+
+  // Renderer's answer to an inline clarify card. Resolves the pending gateway
+  // request for this request_id, which forwards the answer to `clarify.respond`.
+  ipcMain.handle(
+    "clarify-respond",
+    (_event, payload: { requestId: string; answer: string }) => {
+      return resolvePendingClarify(
+        payload?.requestId ?? "",
+        payload?.answer ?? "",
+      );
+    },
+  );
+
+  // Renderer-driven clipboard write (issue #298 — "Copy entire chat").
+  // Routed through the main process so it doesn't depend on the renderer's
+  // document being focused, which the navigator.clipboard API requires.
+  ipcMain.handle("copy-to-clipboard", (_event, text: string) => {
+    clipboard.writeText(typeof text === "string" ? text : "");
+  });
+
+  // Media — render agent-generated images and save them to disk (#299).
+  ipcMain.handle("read-media-file", (_event, filePath: string) =>
+    readMediaAsDataUrl(filePath),
+  );
+  ipcMain.handle("save-media-file", (event, src: string, name: string) =>
+    saveMedia(src, name, BrowserWindow.fromWebContents(event.sender)),
+  );
+  ipcMain.handle("media-file-exists", (_event, filePath: string) =>
+    mediaFileExists(filePath),
+  );
+
+  // Native right-click menu for a rendered media element (#299): "Open"
+  // hands the file to the OS default handler (or a web URL to the browser),
+  // "Save as…" writes a copy elsewhere. Labels are passed in from the
+  // renderer so the menu honours the active UI locale.
+  ipcMain.on(
+    "show-media-menu",
+    (
+      event,
+      src: string,
+      name: string,
+      labels: { open: string; saveAs: string },
+    ) => {
+      const win = BrowserWindow.fromWebContents(event.sender);
+      if (!win || !src) return;
+      const isUrl = /^https?:\/\//i.test(src);
+      const isData = src.startsWith("data:");
+      const template: Electron.MenuItemConstructorOptions[] = [];
+      template.push({
+        label: labels.open,
+        click: () => {
+          if (isUrl) {
+            openExternalUrl(src);
+            return;
+          }
+
+          const target = isData ? materializeDataUrlToTemp(src, name) : src;
+          if (!target) return;
+          shell.openPath(target).then((err) => {
+            if (err) console.error("[media] open failed:", err);
+          });
+        },
+      });
+      template.push({
+        label: labels.saveAs,
+        click: () => {
+          void saveMedia(src, name, win);
+        },
+      });
+      Menu.buildFromTemplate(template).popup({ window: win });
+    },
+  );
+
+  // Attachment staging — for pasted blobs that have no filesystem origin.
+  ipcMain.handle(
+    "stage-attachment",
+    (_event, sessionId: string, filename: string, base64Bytes: string) => {
+      return stageAttachment(sessionId, filename, base64Bytes);
+    },
+  );
+  ipcMain.handle("clear-staged-attachments", (_event, sessionId: string) => {
+    clearStagedAttachments(sessionId);
+  });
+
+  // Model discovery — fetch the provider's /v1/models for autocomplete.
+  ipcMain.handle(
+    "discover-provider-models",
+    (
+      _event,
+      provider: string,
+      baseUrl: string | undefined,
+      apiKey: string | undefined,
+      profile?: string,
+    ) => {
+      return discoverProviderModels(provider, baseUrl, apiKey, profile);
+    },
+  );
+
+  // Authoritative context-window size for the active model (issue #597).
+  // Resolves the real `context_length` from the provider's /models catalogue;
+  // returns null when unavailable so the renderer falls back to its heuristic.
+  ipcMain.handle(
+    "get-model-context-window",
+    (
+      _event,
+      provider: string,
+      model: string,
+      baseUrl: string | undefined,
+      profile?: string,
+    ) => {
+      return getModelContextWindow(
+        provider,
+        model,
+        baseUrl,
+        undefined,
+        profile,
+      );
+    },
+  );
 
   // Gateway
   ipcMain.handle("start-gateway", async () => {
     const conn = getConnectionConfig();
-    if (conn.mode === "ssh" && conn.ssh) { await sshStartGateway(conn.ssh); return true; }
-    return startGateway();
+    if (conn.mode === "ssh" && conn.ssh) {
+      await sshStartGateway(conn.ssh);
+      return { success: true, running: true };
+    }
+    if (conn.mode === "remote") {
+      // The remote server runs its own gateway; nothing to start locally.
+      // Without this guard we'd fall through to `startGateway()` and
+      // spawn a non-existent local hermes-agent (issue #266).
+      return {
+        success: false,
+        running: false,
+        error:
+          "Remote mode points at an already-running Hermes server. Start or restart the gateway on that remote host.",
+      };
+    }
+    return startGatewayDetailed();
   });
   ipcMain.handle("stop-gateway", async () => {
     const conn = getConnectionConfig();
-    if (conn.mode === "ssh" && conn.ssh) { await sshStopGateway(conn.ssh); return true; }
-    stopGateway(true);
+    if (conn.mode === "ssh" && conn.ssh) {
+      await sshStopGateway(conn.ssh);
+      return true;
+    }
+    if (conn.mode === "remote") {
+      // No local gateway to stop in pure remote mode.
+      return true;
+    }
+    // No profile argument → stops the active profile's gateway, leaving any
+    // other profiles' gateways running.
+    stopGateway(undefined, true);
     return true;
+  });
+  ipcMain.handle("restart-gateway", async (_event, profile?: string) => {
+    const conn = getConnectionConfig();
+    if (conn.mode === "ssh" && conn.ssh) {
+      await sshStopGateway(conn.ssh);
+      await sshStartGateway(conn.ssh);
+      return sshGatewayStatus(conn.ssh);
+    }
+    if (conn.mode === "remote") {
+      return false;
+    }
+    return restartGateway(profile);
   });
   ipcMain.handle("gateway-status", () => {
     const conn = getConnectionConfig();
@@ -685,7 +1283,8 @@ function setupIPC(): void {
   // Platform toggles (config.yaml platforms section)
   ipcMain.handle("get-platform-enabled", (_event, profile?: string) => {
     const conn = getConnectionConfig();
-    if (conn.mode === "ssh" && conn.ssh) return sshGetPlatformEnabled(conn.ssh, profile);
+    if (conn.mode === "ssh" && conn.ssh)
+      return sshGetPlatformEnabled(conn.ssh, profile);
     return getPlatformEnabled(profile);
   });
   ipcMain.handle(
@@ -698,24 +1297,153 @@ function setupIPC(): void {
       }
       setPlatformEnabled(platform, enabled, profile);
       // Restart gateway so it picks up the new platform config
-      if (isGatewayRunning()) {
+      if (isGatewayRunning(profile)) {
         restartGateway(profile);
       }
       return true;
     },
   );
 
+  ipcMain.handle(
+    "get-messaging-platforms",
+    async (_event, profile?: string) => {
+      const conn = getConnectionConfig();
+      if (conn.mode === "remote") {
+        return fetchRemoteMessagingPlatforms();
+      }
+      if (conn.mode === "ssh" && conn.ssh) {
+        const [envData, enabled, running, platformToolsets] = await Promise.all(
+          [
+            sshReadEnv(conn.ssh, profile),
+            sshGetPlatformEnabled(conn.ssh, profile),
+            sshGatewayStatus(conn.ssh),
+            sshGetPlatformToolsets(conn.ssh, profile),
+          ],
+        );
+        return buildDesktopMessagingPlatforms(
+          envData,
+          enabled,
+          running,
+          platformToolsets,
+        );
+      }
+      const running = isGatewayRunning(profile);
+      return buildDesktopMessagingPlatforms(
+        readEnv(profile),
+        getPlatformEnabled(profile),
+        running,
+        getPlatformToolsets(profile),
+        readLocalGatewayPlatformStates(profile, running),
+      );
+    },
+  );
+
+  ipcMain.handle(
+    "update-messaging-platform",
+    async (_event, platform: string, update, profile?: string) => {
+      const conn = getConnectionConfig();
+      if (conn.mode === "remote") {
+        return updateRemoteMessagingPlatform(platform, update);
+      }
+      if (conn.mode === "ssh" && conn.ssh) {
+        await applyMessagingPlatformUpdate(
+          platform,
+          update,
+          (key, value) => sshSetEnvValue(conn.ssh!, key, value, profile),
+          (key, enabled) =>
+            sshSetPlatformEnabled(conn.ssh!, key, enabled, profile),
+          (platformKey, toolsetKey, enabled) =>
+            sshSetMessagingPlatformToolsetEnabled(
+              conn.ssh!,
+              platformKey,
+              toolsetKey,
+              enabled,
+              profile,
+            ),
+        );
+        return { ok: true, platform };
+      }
+      await applyMessagingPlatformUpdate(
+        platform,
+        update,
+        (key, value) => setEnvValue(key, value, profile),
+        (key, enabled) => setPlatformEnabled(key, enabled, profile),
+        (platformKey, toolsetKey, enabled) =>
+          setMessagingPlatformToolsetEnabled(
+            platformKey,
+            toolsetKey,
+            enabled,
+            profile,
+          ),
+      );
+      if (isGatewayRunning(profile)) {
+        restartGateway(profile);
+      }
+      return { ok: true, platform };
+    },
+  );
+
+  ipcMain.handle(
+    "test-messaging-platform",
+    async (_event, platform: string, profile?: string) => {
+      const conn = getConnectionConfig();
+      if (conn.mode === "remote") {
+        return testRemoteMessagingPlatform(platform);
+      }
+      if (conn.mode === "ssh" && conn.ssh) {
+        const [envData, enabled, running, platformToolsets] = await Promise.all(
+          [
+            sshReadEnv(conn.ssh, profile),
+            sshGetPlatformEnabled(conn.ssh, profile),
+            sshGatewayStatus(conn.ssh),
+            sshGetPlatformToolsets(conn.ssh, profile),
+          ],
+        );
+        return testDesktopMessagingPlatform(
+          platform,
+          buildDesktopMessagingPlatforms(
+            envData,
+            enabled,
+            running,
+            platformToolsets,
+          ),
+        );
+      }
+      const running = isGatewayRunning(profile);
+      return testDesktopMessagingPlatform(
+        platform,
+        buildDesktopMessagingPlatforms(
+          readEnv(profile),
+          getPlatformEnabled(profile),
+          running,
+          getPlatformToolsets(profile),
+          readLocalGatewayPlatformStates(profile, running),
+        ),
+      );
+    },
+  );
+
   // Sessions
   ipcMain.handle("list-sessions", (_event, limit?: number, offset?: number) => {
     const conn = getConnectionConfig();
-    if (conn.mode === "ssh" && conn.ssh) return sshListSessions(conn.ssh, limit, offset);
+    if (conn.mode === "ssh" && conn.ssh)
+      return sshListSessions(conn.ssh, limit, offset);
     return listSessions(limit, offset);
   });
 
   ipcMain.handle("get-session-messages", (_event, sessionId: string) => {
     const conn = getConnectionConfig();
-    if (conn.mode === "ssh" && conn.ssh) return sshGetSessionMessages(conn.ssh, sessionId);
+    if (conn.mode === "ssh" && conn.ssh)
+      return sshGetSessionMessages(conn.ssh, sessionId);
     return getSessionMessages(sessionId);
+  });
+
+  ipcMain.handle("delete-session", (_event, sessionId: string) => {
+    return deleteSession(sessionId);
+  });
+
+  ipcMain.handle("delete-sessions", (_event, sessionIds: string[]) => {
+    return deleteSessions(Array.isArray(sessionIds) ? sessionIds : []);
   });
 
   // Profiles
@@ -726,30 +1454,58 @@ function setupIPC(): void {
   });
   ipcMain.handle("create-profile", (_event, name: string, clone: boolean) => {
     const conn = getConnectionConfig();
-    if (conn.mode === "ssh" && conn.ssh) return sshCreateProfile(conn.ssh, name, clone);
+    if (conn.mode === "ssh" && conn.ssh)
+      return sshCreateProfile(conn.ssh, name, clone);
     return createProfile(name, clone);
   });
   ipcMain.handle("delete-profile", (_event, name: string) => {
     const conn = getConnectionConfig();
-    if (conn.mode === "ssh" && conn.ssh) return sshDeleteProfile(conn.ssh, name);
+    if (conn.mode === "ssh" && conn.ssh)
+      return sshDeleteProfile(conn.ssh, name);
     return deleteProfile(name);
   });
   ipcMain.handle("set-active-profile", (_event, name: string) => {
-    if (getConnectionConfig().mode !== "ssh") setActiveProfile(name);
+    if (getConnectionConfig().mode !== "ssh") {
+      setActiveProfile(name);
+      // The desktop now follows this profile: chat/health resolve their URL
+      // from the active profile's own port. Drop the cached health flag so the
+      // next check probes the new gateway rather than the previous profile's.
+      notifyProfileSwitched();
+      // Bring the activated profile's own gateway up if it isn't already —
+      // without stopping any other profile's gateway (their bots stay online).
+      if (!isRemoteMode() && !isGatewayRunning(name)) {
+        startGateway(name);
+      }
+    }
     return true;
   });
+
+  // Profile appearance (desktop-only avatar + accent colour). Local-only —
+  // these write to the local ~/.hermes profile dirs, not the SSH remote.
+  ipcMain.handle("set-profile-color", (_event, name: string, color: string) =>
+    setProfileColor(name, color),
+  );
+  ipcMain.handle(
+    "set-profile-avatar",
+    (_event, name: string, dataUrl: string) => setProfileAvatar(name, dataUrl),
+  );
+  ipcMain.handle("remove-profile-avatar", (_event, name: string) =>
+    removeProfileAvatar(name),
+  );
 
   // Memory
   ipcMain.handle("read-memory", (_event, profile?: string) => {
     const conn = getConnectionConfig();
-    if (conn.mode === "ssh" && conn.ssh) return sshReadMemory(conn.ssh, profile);
+    if (conn.mode === "ssh" && conn.ssh)
+      return sshReadMemory(conn.ssh, profile);
     return readMemory(profile);
   });
   ipcMain.handle(
     "add-memory-entry",
     (_event, content: string, profile?: string) => {
       const conn = getConnectionConfig();
-      if (conn.mode === "ssh" && conn.ssh) return sshAddMemoryEntry(conn.ssh, content, profile);
+      if (conn.mode === "ssh" && conn.ssh)
+        return sshAddMemoryEntry(conn.ssh, content, profile);
       return addMemoryEntry(content, profile);
     },
   );
@@ -757,7 +1513,8 @@ function setupIPC(): void {
     "update-memory-entry",
     (_event, index: number, content: string, profile?: string) => {
       const conn = getConnectionConfig();
-      if (conn.mode === "ssh" && conn.ssh) return sshUpdateMemoryEntry(conn.ssh, index, content, profile);
+      if (conn.mode === "ssh" && conn.ssh)
+        return sshUpdateMemoryEntry(conn.ssh, index, content, profile);
       return updateMemoryEntry(index, content, profile);
     },
   );
@@ -765,7 +1522,8 @@ function setupIPC(): void {
     "remove-memory-entry",
     (_event, index: number, profile?: string) => {
       const conn = getConnectionConfig();
-      if (conn.mode === "ssh" && conn.ssh) return sshRemoveMemoryEntry(conn.ssh, index, profile);
+      if (conn.mode === "ssh" && conn.ssh)
+        return sshRemoveMemoryEntry(conn.ssh, index, profile);
       return removeMemoryEntry(index, profile);
     },
   );
@@ -773,7 +1531,8 @@ function setupIPC(): void {
     "write-user-profile",
     (_event, content: string, profile?: string) => {
       const conn = getConnectionConfig();
-      if (conn.mode === "ssh" && conn.ssh) return sshWriteUserProfile(conn.ssh, content, profile);
+      if (conn.mode === "ssh" && conn.ssh)
+        return sshWriteUserProfile(conn.ssh, content, profile);
       return writeUserProfile(content, profile);
     },
   );
@@ -786,7 +1545,8 @@ function setupIPC(): void {
   });
   ipcMain.handle("write-soul", (_event, content: string, profile?: string) => {
     const conn = getConnectionConfig();
-    if (conn.mode === "ssh" && conn.ssh) return sshWriteSoul(conn.ssh, content, profile);
+    if (conn.mode === "ssh" && conn.ssh)
+      return sshWriteSoul(conn.ssh, content, profile);
     return writeSoul(content, profile);
   });
   ipcMain.handle("reset-soul", (_event, profile?: string) => {
@@ -798,14 +1558,16 @@ function setupIPC(): void {
   // Tools
   ipcMain.handle("get-toolsets", (_event, profile?: string) => {
     const conn = getConnectionConfig();
-    if (conn.mode === "ssh" && conn.ssh) return sshGetToolsets(conn.ssh, profile);
+    if (conn.mode === "ssh" && conn.ssh)
+      return sshGetToolsets(conn.ssh, profile);
     return getToolsets(profile);
   });
   ipcMain.handle(
     "set-toolset-enabled",
     (_event, key: string, enabled: boolean, profile?: string) => {
       const conn = getConnectionConfig();
-      if (conn.mode === "ssh" && conn.ssh) return sshSetToolsetEnabled(conn.ssh, key, enabled, profile);
+      if (conn.mode === "ssh" && conn.ssh)
+        return sshSetToolsetEnabled(conn.ssh, key, enabled, profile);
       return setToolsetEnabled(key, enabled, profile);
     },
   );
@@ -813,7 +1575,8 @@ function setupIPC(): void {
   // Skills
   ipcMain.handle("list-installed-skills", (_event, profile?: string) => {
     const conn = getConnectionConfig();
-    if (conn.mode === "ssh" && conn.ssh) return sshListInstalledSkills(conn.ssh, profile);
+    if (conn.mode === "ssh" && conn.ssh)
+      return sshListInstalledSkills(conn.ssh, profile);
     return listInstalledSkills(profile);
   });
   ipcMain.handle("list-bundled-skills", () => {
@@ -823,36 +1586,49 @@ function setupIPC(): void {
   });
   ipcMain.handle("get-skill-content", (_event, skillPath: string) => {
     const conn = getConnectionConfig();
-    if (conn.mode === "ssh" && conn.ssh) return sshGetSkillContent(conn.ssh, skillPath);
+    if (conn.mode === "ssh" && conn.ssh)
+      return sshGetSkillContent(conn.ssh, skillPath);
     return getSkillContent(skillPath);
   });
   ipcMain.handle(
     "install-skill",
     (_event, identifier: string, _profile?: string) => {
       const conn = getConnectionConfig();
-      if (conn.mode === "ssh" && conn.ssh) return sshInstallSkill(conn.ssh, identifier);
+      if (conn.mode === "ssh" && conn.ssh)
+        return sshInstallSkill(conn.ssh, identifier);
       return installSkill(identifier, _profile);
     },
   );
-  ipcMain.handle("uninstall-skill", (_event, name: string, _profile?: string) => {
-    const conn = getConnectionConfig();
-    if (conn.mode === "ssh" && conn.ssh) return sshUninstallSkill(conn.ssh, name);
-    return uninstallSkill(name, _profile);
-  });
+  ipcMain.handle(
+    "uninstall-skill",
+    (_event, name: string, _profile?: string) => {
+      const conn = getConnectionConfig();
+      if (conn.mode === "ssh" && conn.ssh)
+        return sshUninstallSkill(conn.ssh, name);
+      return uninstallSkill(name, _profile);
+    },
+  );
 
   // Session cache (fast local cache with generated titles)
   ipcMain.handle(
     "list-cached-sessions",
     (_event, limit?: number, offset?: number) => {
       const conn = getConnectionConfig();
-      if (conn.mode === "ssh" && conn.ssh) return sshListCachedSessions(conn.ssh, limit, offset);
+      if (conn.mode === "ssh" && conn.ssh)
+        return sshListCachedSessions(conn.ssh, limit, offset);
       return listCachedSessions(limit, offset);
     },
   );
   ipcMain.handle("sync-session-cache", () => {
     const conn = getConnectionConfig();
-    if (conn.mode === "ssh" && conn.ssh) return sshListCachedSessions(conn.ssh, 50);
-    return syncSessionCache();
+    if (conn.mode === "ssh" && conn.ssh)
+      return sshListCachedSessions(conn.ssh, 50);
+    try {
+      return syncSessionCache();
+    } catch (error) {
+      console.error("sync-session-cache failed; using local cache", error);
+      return listCachedSessions(50);
+    }
   });
   ipcMain.handle(
     "update-session-title",
@@ -863,21 +1639,45 @@ function setupIPC(): void {
   // Session search
   ipcMain.handle("search-sessions", (_event, query: string, limit?: number) => {
     const conn = getConnectionConfig();
-    if (conn.mode === "ssh" && conn.ssh) return sshSearchSessions(conn.ssh, query, limit);
+    if (conn.mode === "ssh" && conn.ssh)
+      return sshSearchSessions(conn.ssh, query, limit);
     return searchSessions(query, limit);
   });
 
-  // Credential Pool
-  ipcMain.handle("get-credential-pool", () => getCredentialPool());
+  // Credential Pool — profile-aware. When `profile` is omitted, the
+  // credential pool helpers default to the currently active profile's
+  // auth.json (see config.ts:authFilePath), so the renderer can pass an
+  // explicit profile or rely on the active-profile fallback.
+  ipcMain.handle("get-credential-pool", (_event, profile?: string) =>
+    getCredentialPool(profile),
+  );
   ipcMain.handle(
     "set-credential-pool",
     (
       _event,
       provider: string,
-      entries: Array<{ key: string; label: string }>,
+      entries: Array<Record<string, unknown>>,
+      profile?: string,
     ) => {
-      setCredentialPool(provider, entries);
+      setCredentialPool(provider, entries, profile);
       return true;
+    },
+  );
+
+  // Append a user-typed key as a properly-shaped credential pool
+  // entry. Constructs the full upstream schema (id, label, auth_type,
+  // priority, source, access_token, base_url, request_count) so the
+  // engine's resolver can read it — issue #367 Bug 3.
+  ipcMain.handle(
+    "add-credential-pool-entry",
+    (
+      _event,
+      provider: string,
+      apiKey: string,
+      label: string,
+      profile?: string,
+    ) => {
+      return addCredentialPoolEntry(provider, apiKey, label, profile);
     },
   );
 
@@ -889,14 +1689,33 @@ function setupIPC(): void {
   });
   ipcMain.handle(
     "add-model",
-    (_event, name: string, provider: string, model: string, baseUrl: string) =>
-      addModel(name, provider, model, baseUrl),
+    (
+      _event,
+      name: string,
+      provider: string,
+      model: string,
+      baseUrl: string,
+    ) => {
+      const conn = getConnectionConfig();
+      if (conn.mode === "ssh" && conn.ssh) {
+        return sshAddModel(conn.ssh, name, provider, model, baseUrl);
+      }
+      return addModel(name, provider, model, baseUrl);
+    },
   );
-  ipcMain.handle("remove-model", (_event, id: string) => removeModel(id));
+  ipcMain.handle("remove-model", (_event, id: string) => {
+    const conn = getConnectionConfig();
+    if (conn.mode === "ssh" && conn.ssh) return sshRemoveModel(conn.ssh, id);
+    return removeModel(id);
+  });
   ipcMain.handle(
     "update-model",
-    (_event, id: string, fields: Record<string, string>) =>
-      updateModel(id, fields),
+    (_event, id: string, fields: Record<string, string>) => {
+      const conn = getConnectionConfig();
+      if (conn.mode === "ssh" && conn.ssh)
+        return sshUpdateModel(conn.ssh, id, fields);
+      return updateModel(id, fields);
+    },
   );
 
   // Claw3D
@@ -924,7 +1743,22 @@ function setupIPC(): void {
     return true;
   });
 
-  ipcMain.handle("claw3d-start-all", () => startClaw3dAll());
+  ipcMain.handle("claw3d-start-all", (_event, profile?: string) =>
+    startOfficeStack(profile, {
+      getConnectionConfig,
+      isGatewayRunning,
+      startGateway,
+      sshGatewayStatus,
+      sshStartGateway,
+      startSshTunnel,
+      stopSshTunnel,
+      sshReadRemoteApiKey,
+      setSshRemoteApiKey,
+      startClaw3dAll,
+      stopClaw3dAll: stopClaw3d,
+      waitForClaw3dReady,
+    }),
+  );
   ipcMain.handle("claw3d-stop-all", () => {
     stopClaw3d();
     return true;
@@ -1033,6 +1867,101 @@ function setupIPC(): void {
     if (result.canceled || result.filePaths.length === 0) return null;
     return result.filePaths[0];
   });
+
+  // Read directory contents for worktree panel
+  ipcMain.handle(
+    "read-directory",
+    async (
+      _event,
+      dirPath: string,
+    ): Promise<{ name: string; isDirectory: boolean }[] | null> => {
+      try {
+        const entries = await readdir(dirPath, { withFileTypes: true });
+        return entries.map((entry) => ({
+          name: entry.name,
+          isDirectory: entry.isDirectory(),
+        }));
+      } catch {
+        return null;
+      }
+    },
+  );
+
+  // Read file contents for file viewer
+  ipcMain.handle(
+    "read-file",
+    async (
+      _event,
+      filePath: string,
+      maxBytes?: number,
+    ): Promise<{ content: string; truncated: boolean } | null> => {
+      try {
+        const limit = maxBytes ?? 102400; // Default 100KB
+        const buffer = await readFile(filePath);
+        const truncated = buffer.byteLength > limit;
+        const content = truncated
+          ? buffer.subarray(0, limit).toString("utf-8")
+          : buffer.toString("utf-8");
+        return { content, truncated };
+      } catch {
+        return null;
+      }
+    },
+  );
+
+  // Open file in default application
+  ipcMain.handle("open-file-in-editor", async (_event, filePath: string) => {
+    try {
+      await shell.openPath(filePath);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+
+  ipcMain.handle("open-terminal", async (_event, dirPath: string) => {
+    if (isRemoteOnlyMode()) return false;
+    if (typeof dirPath !== "string" || dirPath.trim().length === 0)
+      return false;
+    try {
+      const info = await stat(dirPath);
+      if (!info.isDirectory()) return false;
+      return await openTerminalInDirectory(dirPath);
+    } catch {
+      return false;
+    }
+  });
+
+  // Read image file as data URL for preview
+  ipcMain.handle(
+    "read-image-file",
+    async (_event, filePath: string): Promise<string | null> => {
+      try {
+        const buffer = await readFile(filePath);
+        const ext = extname(filePath).toLowerCase().slice(1);
+        const mimeType =
+          ext === "png"
+            ? "image/png"
+            : ext === "jpg" || ext === "jpeg"
+              ? "image/jpeg"
+              : ext === "gif"
+                ? "image/gif"
+                : ext === "webp"
+                  ? "image/webp"
+                  : ext === "svg"
+                    ? "image/svg+xml"
+                    : ext === "bmp"
+                      ? "image/bmp"
+                      : ext === "ico"
+                        ? "image/x-icon"
+                        : "application/octet-stream";
+        const base64 = buffer.toString("base64");
+        return `data:${mimeType};base64,${base64}`;
+      } catch {
+        return null;
+      }
+    },
+  );
   ipcMain.handle(
     "kanban-assign-task",
     (_event, taskId: string, assignee: string | null, profile?: string) =>
@@ -1078,6 +2007,9 @@ function setupIPC(): void {
     (_event, dryRun?: boolean, profile?: string) =>
       kanbanDispatchOnce(dryRun, profile),
   );
+  ipcMain.handle("kanban-list-claw3d-hq-tasks", () =>
+    kanbanListClaw3dHqTasks(),
+  );
 
   // Shell
   ipcMain.handle("open-external", (_event, url: string) => {
@@ -1105,18 +2037,66 @@ function setupIPC(): void {
   ipcMain.handle("list-mcp-servers", (_event, profile?: string) =>
     listMcpServers(profile),
   );
+  ipcMain.handle(
+    "add-mcp-server",
+    (_event, input: McpServerInput, profile?: string) =>
+      addMcpServer(input, profile),
+  );
+  ipcMain.handle(
+    "remove-mcp-server",
+    (_event, name: string, profile?: string) => removeMcpServer(name, profile),
+  );
+  ipcMain.handle(
+    "set-mcp-server-enabled",
+    (_event, name: string, enabled: boolean, profile?: string) =>
+      setMcpServerEnabled(name, enabled, profile),
+  );
+  ipcMain.handle("test-mcp-server", (_event, name: string, profile?: string) =>
+    testMcpServer(name, profile),
+  );
+  ipcMain.handle("list-mcp-catalog", (_event, profile?: string) =>
+    listMcpCatalog(profile),
+  );
+  ipcMain.handle(
+    "install-mcp-catalog-entry",
+    (_event, name: string, env?: Record<string, string>, profile?: string) =>
+      installMcpCatalogEntry(name, env, profile),
+  );
+
+  // Discover marketplace (community registry)
+  ipcMain.handle("registry-fetch", (_event, force?: boolean) =>
+    fetchRegistry(!!force),
+  );
+  ipcMain.handle("registry-fetch-models", (_event, force?: boolean) =>
+    fetchModelRegistry(!!force),
+  );
+  ipcMain.handle("registry-list-installed", (_event, profile?: string) =>
+    listInstalledRegistry(profile),
+  );
+  ipcMain.handle(
+    "registry-detail",
+    (_event, kind: RegistryKind, item: RegistryItem) =>
+      fetchRegistryDetail(kind, item),
+  );
+  ipcMain.handle(
+    "registry-install",
+    (_event, kind: RegistryKind, item: RegistryItem, profile?: string) =>
+      installRegistryItem(kind, item, profile),
+  );
 
   // Memory providers
   ipcMain.handle("discover-memory-providers", (_event, profile?: string) => {
     const conn = getConnectionConfig();
-    if (conn.mode === "ssh" && conn.ssh) return sshDiscoverMemoryProviders(conn.ssh, profile);
+    if (conn.mode === "ssh" && conn.ssh)
+      return sshDiscoverMemoryProviders(conn.ssh, profile);
     return discoverMemoryProviders(profile);
   });
 
   // Log viewer
   ipcMain.handle("read-logs", (_event, logFile?: string, lines?: number) => {
     const conn = getConnectionConfig();
-    if (conn.mode === "ssh" && conn.ssh) return sshReadLogs(conn.ssh, logFile, lines);
+    if (conn.mode === "ssh" && conn.ssh)
+      return sshReadLogs(conn.ssh, logFile, lines);
     return readLogs(logFile, lines);
   });
 }
@@ -1229,8 +2209,15 @@ function setupUpdater(): void {
   // IPC handlers must always be registered to avoid invoke errors
   ipcMain.handle("get-app-version", () => app.getVersion());
 
-  if (!app.isPackaged) {
-    // Skip auto-update in dev mode
+  // Portable Windows builds set PORTABLE_EXECUTABLE_DIR. They have no
+  // install location for electron-updater to replace in place, so an
+  // update check just fails and surfaces a spurious "Update failed".
+  // Skip the updater for them (users update by downloading a new
+  // portable .exe), same as dev mode.
+  const isPortableBuild = !!process.env.PORTABLE_EXECUTABLE_DIR;
+
+  if (!app.isPackaged || isPortableBuild) {
+    // Skip auto-update in dev mode and portable builds
     ipcMain.handle("check-for-updates", async () => null);
     ipcMain.handle("download-update", () => true);
     ipcMain.handle("install-update", () => {});
@@ -1243,7 +2230,12 @@ function setupUpdater(): void {
     autoUpdater: AppUpdater;
   };
 
-  autoUpdater.autoDownload = false;
+  // Log the updater's own lifecycle to <userData>/logs/updater.log so a
+  // failed update (e.g. issue #271) leaves something to diagnose.
+  autoUpdater.logger = updaterLogger;
+  // Auto-download as soon as an update is found, then surface a single
+  // "Restart to Update" action once it's ready — no manual download step.
+  autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
 
   autoUpdater.on("update-available", (info) => {
@@ -1276,12 +2268,23 @@ function setupUpdater(): void {
     }
   });
 
-  ipcMain.handle("download-update", () => {
-    autoUpdater.downloadUpdate();
-    return true;
+  ipcMain.handle("download-update", async () => {
+    try {
+      await autoUpdater.downloadUpdate();
+      return true;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      mainWindow?.webContents.send("update-error", message);
+      return false;
+    }
   });
 
   ipcMain.handle("install-update", () => {
+    // Bracket the suspect call: if the log shows this line but the app
+    // never relaunches, the failure is in quitAndInstall / the installer.
+    updaterLogger.info(
+      "Restart requested by user — calling quitAndInstall(isSilent=false, isForceRunAfter=true)",
+    );
     autoUpdater.quitAndInstall(false, true);
   });
 
@@ -1290,9 +2293,56 @@ function setupUpdater(): void {
   }, 5000);
 }
 
+// Opt-in Chrome DevTools Protocol port for E2E testing. Set
+// ENABLE_CDP=1 (with optional CDP_PORT, default 9222) before launching
+// `npm run dev` to expose the renderer for Playwright (or any CDP
+// client) to attach and drive the UI without going through
+// screenshots / OCR. Off by default — no effect on normal dev or
+// production builds. See `scripts/README.md` for the harness workflow.
+if (process.env.ENABLE_CDP === "1") {
+  app.commandLine.appendSwitch(
+    "remote-debugging-port",
+    process.env.CDP_PORT || "9222",
+  );
+}
+
 app.whenReady().then(() => {
-  app.name = "Hermes";
+  app.setName("Hermes One");
   electronApp.setAppUserModelId("com.nousresearch.hermes");
+  cleanupTempMediaFiles();
+
+  // Allow microphone access for the app's own renderer (voice input). Without
+  // a handler Electron denies getUserMedia by default. Scoped to the `media`
+  // permission only; everything else stays denied.
+  session.defaultSession.setPermissionRequestHandler(
+    (_wc, permission, callback) => {
+      callback(permission === "media");
+    },
+  );
+  session.defaultSession.setPermissionCheckHandler(
+    (_wc, permission) => permission === "media",
+  );
+
+  // In production, inject PostHog domains into the CSP response header.
+  // Skipped in dev — Vite manages its own CSP headers with nonces for
+  // Fast Refresh inline scripts; overriding them breaks the dev server.
+  if (!is.dev) {
+    session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+      const csp =
+        "default-src 'self'; " +
+        "script-src 'self' 'wasm-unsafe-eval' https://*.posthog.com https://*.i.posthog.com; " +
+        "style-src 'self' 'unsafe-inline'; " +
+        "img-src 'self' data: blob:; " +
+        "connect-src 'self' blob: https://*.posthog.com https://*.i.posthog.com; " +
+        "media-src 'self' blob:";
+      callback({
+        responseHeaders: {
+          ...details.responseHeaders,
+          "Content-Security-Policy": [csp],
+        },
+      });
+    });
+  }
 
   app.on("browser-window-created", (_, window) => {
     optimizer.watchWindowShortcuts(window);
@@ -1313,7 +2363,7 @@ app.whenReady().then(() => {
   const conn = getConnectionConfig();
   if (conn.mode === "ssh" && conn.ssh.host) {
     (async () => {
-      if (!await sshGatewayStatus(conn.ssh)) {
+      if (!(await sshGatewayStatus(conn.ssh))) {
         await sshStartGateway(conn.ssh);
       }
       await startSshTunnel(conn.ssh);
@@ -1331,7 +2381,10 @@ app.whenReady().then(() => {
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
-    stopGateway();
+    // Intentionally do NOT stop the gateway on exit: profile gateways are
+    // detached and meant to keep running headless (e.g. Telegram/Discord bots
+    // stay online after the desktop closes). The user stops a gateway
+    // explicitly via the Gateway controls.
     stopSshTunnel();
     stopClaw3d();
     app.quit();
@@ -1339,12 +2392,12 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  cleanupTempMediaFiles();
   stopHealthPolling();
-  if (currentChatAbort) {
-    currentChatAbort();
-    currentChatAbort = null;
-  }
-  stopGateway();
+  for (const abort of activeRuns.values()) abort();
+  activeRuns.clear();
+  // Leave profile gateways running on quit (see window-all-closed) so bots
+  // and other platforms stay online headless.
   stopSshTunnel();
   stopClaw3d();
 });

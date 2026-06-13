@@ -3,7 +3,23 @@ export default {
   sections: {
     hermesAgent: "Hermes Agent",
     appearance: "Aparência",
+    privacy: "Privacidade",
     credentialPool: "Pool de Credenciais",
+  },
+  analytics: {
+    label: "Enviar análises de uso anônimas",
+    hint: "Ajuda a melhorar o Hermes enviando dados de uso anônimos e agregados para a instância PostHog do projeto (hospedada na UE). Você pode desativar a qualquer momento.",
+    disclosure: {
+      uuid: "Um identificador aleatório por instalação armazenado apenas neste dispositivo (sem nome, e-mail ou dados de conta).",
+      platform:
+        "Seu sistema operacional, versão do Electron e versão do Node.js.",
+      navigation:
+        "Quais telas você abre dentro do app (ex.: Chat, Sessões, Configurações). Conteúdo de chats, prompts, respostas do modelo e conteúdo de arquivos não são coletados.",
+      endpoint:
+        "Os dados são enviados para eu.i.posthog.com (nuvem PostHog da UE). Gravações de sessão e captura automática de pageviews estão desativadas.",
+      notCollected:
+        "Nunca coletado: mensagens de chat, caminhos de arquivos, chaves de API, configuração do modelo, credenciais de conta.",
+    },
   },
   theme: {
     label: "Tema",
@@ -15,6 +31,7 @@ export default {
     label: "Idioma",
     english: "English",
     indonesian: "Indonesio",
+    japanese: "日本語",
     chinese: "中文",
     portuguese: "Português",
     hint: "Escolha o idioma da interface",
@@ -41,6 +58,14 @@ export default {
     "Use qualquer API compatível com OpenAI (LM Studio, Ollama, vLLM, etc.)",
   modelHint:
     "Nome do modelo padrão (deixe em branco para usar o padrão do provedor)",
+  refreshModels: "Atualizar lista de modelos",
+  discoveringModels: "Carregando modelos disponíveis…",
+  discoveredCount:
+    "{{count}} modelos disponíveis — comece a digitar para filtrar",
+  discoveryNoKey:
+    "Defina a chave de API deste provedor no .env para carregar a lista de modelos disponíveis",
+  discoveryError:
+    "Não foi possível acessar a lista de modelos do provedor — você ainda pode digitar um nome de modelo",
   customBaseUrlHint: "Endpoint da API compatível com OpenAI",
   poolHint:
     "Adicione várias chaves de API para o mesmo provedor para rotação automática e balanceamento de carga. O Hermes alternará entre elas.",

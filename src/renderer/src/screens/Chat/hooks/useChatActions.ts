@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useRef } from "react";
 import type { ChatInputHandle } from "../ChatInput";
-import type { ChatMessage } from "../types";
+import type { Attachment, ChatMessage, ChatBubbleMessage } from "../types";
+
+function hasContent(msg: ChatMessage): msg is ChatBubbleMessage {
+  return (
+    msg.kind === "user" ||
+    msg.kind === "assistant" ||
+    (!msg.kind && (msg.role === "user" || msg.role === "agent"))
+  );
+}
 
 interface LocalCommands {
   isLocal: (text: string) => boolean;
@@ -8,6 +16,9 @@ interface LocalCommands {
 }
 
 interface UseChatActionsArgs {
+  /** This conversation's run id — threaded to the main process so its events
+   *  are tagged and its abort targets only this run. */
+  runId: string;
   profile?: string;
   hermesSessionId: string | null;
   messages: ChatMessage[];
@@ -17,11 +28,17 @@ interface UseChatActionsArgs {
   onSessionStarted?: () => void;
   chatInputRef: React.RefObject<ChatInputHandle | null>;
   localCommands: LocalCommands;
+  /** Working folder bound to this conversation (issue #27), or null. */
+  contextFolder: string | null;
 }
 
 interface UseChatActionsResult {
-  handleSend: (text: string) => Promise<void>;
-  handleQuickAsk: (text: string) => Promise<void>;
+  handleSend: (
+    text: string,
+    attachments?: Attachment[],
+    skipLoadingCheck?: boolean,
+  ) => Promise<void>;
+  handleQuickAsk: (text: string, attachments?: Attachment[]) => Promise<void>;
   handleAbort: () => void;
   handleApprove: () => void;
   handleDeny: () => void;
@@ -34,6 +51,7 @@ interface UseChatActionsResult {
  * and `isLoading` are read via live refs that update via `useEffect`.
  */
 export function useChatActions({
+  runId,
   profile,
   hermesSessionId,
   messages,
@@ -43,6 +61,7 @@ export function useChatActions({
   onSessionStarted,
   chatInputRef,
   localCommands,
+  contextFolder,
 }: UseChatActionsArgs): UseChatActionsResult {
   const messagesRef = useRef(messages);
   const isLoadingRef = useRef(isLoading);
@@ -52,39 +71,53 @@ export function useChatActions({
   });
 
   const pushUser = useCallback(
-    (content: string, idPrefix = "user") => {
+    (content: string, idPrefix = "user", attachments?: Attachment[]) => {
       setMessages((prev) => [
         ...prev,
-        { id: `${idPrefix}-${Date.now()}`, role: "user", content },
+        {
+          id: `${idPrefix}-${Date.now()}`,
+          role: "user",
+          content,
+          ...(attachments && attachments.length > 0 ? { attachments } : {}),
+        },
       ]);
     },
     [setMessages],
   );
 
   const sendToAgent = useCallback(
-    async (text: string): Promise<void> => {
+    async (text: string, attachments?: Attachment[]): Promise<void> => {
       try {
         await window.hermesAPI.sendMessage(
           text,
           profile,
           hermesSessionId || undefined,
-          messagesRef.current.map((m) => ({
+          messagesRef.current.filter(hasContent).map((m) => ({
             role: m.role,
             content: m.content,
           })),
+          attachments,
+          contextFolder ?? undefined,
+          runId,
         );
       } catch {
         // onChatError IPC already surfaces this to the user
       }
     },
-    [profile, hermesSessionId],
+    [runId, profile, hermesSessionId, contextFolder],
   );
 
   const handleSend = useCallback(
-    async (text: string): Promise<void> => {
-      if (!text || isLoadingRef.current) return;
+    async (
+      text: string,
+      attachments?: Attachment[],
+      skipLoadingCheck = false,
+    ): Promise<void> => {
+      const hasPayload = text.length > 0 || (attachments?.length ?? 0) > 0;
+      if (!hasPayload) return;
+      if (!skipLoadingCheck && isLoadingRef.current) return;
 
-      if (localCommands.isLocal(text)) {
+      if (text && localCommands.isLocal(text)) {
         const cmd = text.split(/\s+/)[0].toLowerCase();
         if (cmd !== "/new" && cmd !== "/clear") pushUser(text);
         await localCommands.executeLocal(text);
@@ -92,28 +125,28 @@ export function useChatActions({
       }
 
       setIsLoading(true);
-      pushUser(text);
+      pushUser(text, "user", attachments);
       onSessionStarted?.();
-      await sendToAgent(text);
+      await sendToAgent(text, attachments);
     },
     [localCommands, pushUser, onSessionStarted, sendToAgent, setIsLoading],
   );
 
   const handleQuickAsk = useCallback(
-    async (text: string): Promise<void> => {
+    async (text: string, attachments?: Attachment[]): Promise<void> => {
       if (!text || isLoadingRef.current) return;
       setIsLoading(true);
-      pushUser(`💭 ${text}`, "user-btw");
-      await sendToAgent(`/btw ${text}`);
+      pushUser(`💭 ${text}`, "user-btw", attachments);
+      await sendToAgent(`/btw ${text}`, attachments);
     },
     [pushUser, sendToAgent, setIsLoading],
   );
 
   const handleAbort = useCallback(() => {
-    window.hermesAPI.abortChat();
+    window.hermesAPI.abortChat(runId);
     setIsLoading(false);
     setTimeout(() => chatInputRef.current?.focus(), 50);
-  }, [chatInputRef, setIsLoading]);
+  }, [runId, chatInputRef, setIsLoading]);
 
   const handleApprove = useCallback(() => {
     chatInputRef.current?.clear();

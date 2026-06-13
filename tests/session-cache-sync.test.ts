@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { join } from "path";
-import { mkdirSync, rmSync, existsSync } from "fs";
+import { mkdirSync, rmSync, existsSync, writeFileSync } from "fs";
 
 // vi.hoisted runs before module imports, so we can't reference imported
 // helpers here — use the bare Node modules via require.
@@ -128,12 +128,27 @@ vi.mock("better-sqlite3", () => {
       throw new Error(`Unhandled fake run SQL: ${this.sql}`);
     }
 
-    all(...args: unknown[]): SessionRow[] {
+    all(
+      ...args: unknown[]
+    ): SessionRow[] | Array<{ id: string; message_count: number }> {
       if (this.sql.includes("FROM sessions s")) {
         const threshold = Number(args[0] ?? 0);
         return Array.from(this.store.sessions.values())
           .filter((session) => session.started_at > threshold)
           .sort((a, b) => b.started_at - a.started_at);
+      }
+
+      // Phase-2 refresh query introduced for issue #226:
+      //   SELECT id, message_count FROM sessions WHERE id IN (?, ?, …)
+      if (
+        this.sql.includes("SELECT id, message_count FROM sessions") &&
+        this.sql.includes("WHERE id IN")
+      ) {
+        const ids = args.map(String);
+        return ids
+          .map((id) => this.store.sessions.get(id))
+          .filter((s): s is SessionRow => !!s)
+          .map((s) => ({ id: s.id, message_count: s.message_count }));
       }
 
       throw new Error(`Unhandled fake all SQL: ${this.sql}`);
@@ -281,6 +296,37 @@ describe("syncSessionCache", () => {
     expect(existsSync(CACHE_FILE)).toBe(true);
   });
 
+  it("treats an empty cache with a stale lastSync as a cold cache", () => {
+    const oldStart = Math.floor(Date.now() / 1000) - 86400 * 14;
+    seedDb([
+      {
+        id: "old-hidden-session",
+        started_at: oldStart,
+        message_count: 3,
+        firstUserMessage: "Recover this older session",
+      },
+    ]);
+
+    mkdirSync(join(TEST_HOME, "desktop"), { recursive: true });
+    writeFileSync(
+      CACHE_FILE,
+      JSON.stringify({
+        sessions: [],
+        lastSync: Math.floor(Date.now() / 1000),
+      }),
+      "utf-8",
+    );
+
+    const result = syncSessionCache();
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      id: "old-hidden-session",
+      messageCount: 3,
+    });
+    expect(result[0].title).toContain("Recover this older session");
+  });
+
   it("updates messageCount on existing sessions without duplicating them (issue #16 regression)", () => {
     // Use a future started_at so the 5-minute incremental sync window
     // (lastSync - 300) still catches the row on the second sync.
@@ -342,6 +388,184 @@ describe("syncSessionCache", () => {
     expect(result.map((r) => r.id)).toEqual(["s2", "s1"]);
   });
 
+  it("refreshes messageCount for old sessions outside the lastSync window (issue #226)", () => {
+    // Session started well before the 5-minute incremental sync window
+    // looks (lastSync - 300). Without the Phase 2 refresh, the cache
+    // pegs messageCount at whatever was first observed — the user
+    // reports the symptom as "messageCount records only 15 messages
+    // when there are actually 200+".
+    const oldStart = Math.floor(Date.now() / 1000) - 86400 * 30; // 30 days ago
+    seedDb([
+      {
+        id: "old-session",
+        started_at: oldStart,
+        message_count: 1,
+        firstUserMessage: "first",
+      },
+    ]);
+    // First sync acquires the session at messageCount: 1.
+    const first = syncSessionCache();
+    expect(first).toHaveLength(1);
+    expect(first[0].messageCount).toBe(1);
+
+    // Simulate the user accumulating many messages over time — the
+    // session's started_at stays put (well in the past) but its
+    // message_count grows.
+    seedDb([
+      {
+        id: "old-session",
+        started_at: oldStart,
+        message_count: 200,
+        firstUserMessage: "first",
+      },
+    ]);
+    const second = syncSessionCache();
+
+    expect(second).toHaveLength(1);
+    expect(second[0].id).toBe("old-session");
+    expect(second[0].messageCount).toBe(200);
+    // Title and other metadata are preserved (Phase 2 only touches the
+    // count field — no re-running of title generation).
+    expect(second[0].title).toContain("first");
+  });
+
+  it("prunes cached sessions that no longer exist in state.db", () => {
+    const oldStart = Math.floor(Date.now() / 1000) - 86400 * 14;
+    seedDb([
+      {
+        id: "still-present",
+        started_at: oldStart,
+        message_count: 3,
+        firstUserMessage: "keep me",
+      },
+    ]);
+
+    mkdirSync(join(TEST_HOME, "desktop"), { recursive: true });
+    writeFileSync(
+      CACHE_FILE,
+      JSON.stringify({
+        sessions: [
+          {
+            id: "already-deleted",
+            title: "Already deleted",
+            startedAt: oldStart,
+            source: "api_server",
+            messageCount: 1,
+            model: "gpt-5.5",
+          },
+          {
+            id: "still-present",
+            title: "Keep me",
+            startedAt: oldStart,
+            source: "api_server",
+            messageCount: 1,
+            model: "gpt-5.5",
+          },
+        ],
+        lastSync: Math.floor(Date.now() / 1000),
+      }),
+      "utf-8",
+    );
+
+    const result = syncSessionCache();
+
+    expect(result.map((s) => s.id)).toEqual(["still-present"]);
+    expect(result[0].messageCount).toBe(3);
+  });
+
+  it("refreshes some old, leaves others untouched, all in one sync", () => {
+    // Mix: one session inside the lastSync window (handled by Phase 1)
+    // and two outside it (handled by Phase 2). All three counts grow
+    // between syncs; both phases should keep the cache accurate.
+    const now = Math.floor(Date.now() / 1000);
+    const oldA = now - 86400 * 7;
+    const oldB = now - 86400 * 3;
+    const future = now + 600;
+
+    seedDb([
+      {
+        id: "old-a",
+        started_at: oldA,
+        message_count: 5,
+        firstUserMessage: "a",
+      },
+      {
+        id: "old-b",
+        started_at: oldB,
+        message_count: 10,
+        firstUserMessage: "b",
+      },
+      {
+        id: "new-c",
+        started_at: future,
+        message_count: 1,
+        firstUserMessage: "c",
+      },
+    ]);
+    syncSessionCache();
+
+    seedDb([
+      {
+        id: "old-a",
+        started_at: oldA,
+        message_count: 50,
+        firstUserMessage: "a",
+      },
+      {
+        id: "old-b",
+        started_at: oldB,
+        message_count: 25,
+        firstUserMessage: "b",
+      },
+      {
+        id: "new-c",
+        started_at: future,
+        message_count: 7,
+        firstUserMessage: "c",
+      },
+    ]);
+    const result = syncSessionCache();
+
+    const byId = new Map(result.map((r) => [r.id, r] as const));
+    expect(byId.get("old-a")?.messageCount).toBe(50);
+    expect(byId.get("old-b")?.messageCount).toBe(25);
+    expect(byId.get("new-c")?.messageCount).toBe(7);
+  });
+
+  it("updates title and model on existing sessions when DB values change", () => {
+    const future = Math.floor(Date.now() / 1000) + 600;
+    seedDb([
+      {
+        id: "s1",
+        started_at: future,
+        message_count: 2,
+        model: "gpt-4o",
+        title: "Old title",
+        firstUserMessage: "hi",
+      },
+    ]);
+    const first = syncSessionCache();
+    expect(first[0].title).toBe("Old title");
+    expect(first[0].model).toBe("gpt-4o");
+
+    seedDb([
+      {
+        id: "s1",
+        started_at: future,
+        message_count: 5,
+        model: "claude-sonnet-4-20250514",
+        title: "Updated title",
+        firstUserMessage: "hi",
+      },
+    ]);
+    const second = syncSessionCache();
+
+    expect(second).toHaveLength(1);
+    expect(second[0].title).toBe("Updated title");
+    expect(second[0].model).toBe("claude-sonnet-4-20250514");
+    expect(second[0].messageCount).toBe(5);
+  });
+
   it("handles a large existing cache without quadratic blowup (issue #16)", () => {
     // 1500 existing sessions in cache, then sync sees same 1500 but with
     // bumped message counts. The pre-fix O(N²) implementation took >2s here
@@ -367,5 +591,5 @@ describe("syncSessionCache", () => {
     expect(result).toHaveLength(N);
     expect(result.every((r) => r.messageCount === 2)).toBe(true);
     expect(elapsed).toBeLessThan(500);
-  });
+  }, 30000);
 });

@@ -9,6 +9,7 @@ export default {
     "Tanya Cepat (/btw) - pertanyaan sampingan yang tidak memengaruhi konteks percakapan",
   send: "Kirim",
   custom: "Kustom",
+  searchModels: "Cari model...",
   typeModelName: "Ketik nama model...",
   emptyTitle: "Apa yang bisa saya bantu hari ini?",
   emptyHint:
@@ -23,6 +24,21 @@ export default {
   deny: "Tolak",
   newChat: "Chat baru (Cmd+N)",
   clearChat: "Bersihkan chat",
+  setContextFolder: "Atur folder konteks",
+  contextFolderActive: "Folder konteks: {{path}}",
+  removeContextFolder: "Hapus folder konteks",
+  attach: "Lampirkan file",
+  removeAttachment: "Hapus lampiran",
+  dropToAttach: "Lepaskan file untuk dilampirkan",
+  attachUnsupported: "{{name}}: tipe file tidak didukung",
+  attachImageTooLarge: "{{name}}: gambar terlalu besar (maks. 50 MB)",
+  attachImageUncompressible:
+    "{{name}}: gambar tidak dapat dikompresi agar muat (GIF animasi atau format tidak didukung). Coba tangkapan layar statis.",
+  attachTextTooLarge: "{{name}}: file terlalu besar (maks. 256 KB)",
+  attachTooMany: "Terlalu banyak lampiran (maks. 10 per pesan)",
+  attachReadFailed: "{{name}}: tidak dapat dibaca",
+  attachRemoteModeBinary:
+    "{{name}}: lampiran PDF/biner memerlukan mode lokal — gambar dan file teks tetap berfungsi.",
   fastMode: "Mode Cepat",
   fastModeOn: "Mode Cepat AKTIF",
   fastModeActive:
@@ -35,6 +51,11 @@ export default {
   categoryTools: "Alat",
   categoryInfo: "Info",
   noUsageData: "Belum ada data penggunaan. Kirim pesan terlebih dahulu.",
+  media: {
+    open: "Buka",
+    saveAs: "Simpan sebagai…",
+    saveImage: "Simpan gambar",
+  },
   commands: {
     new: "Mulai chat baru",
     clear: "Bersihkan riwayat percakapan",
@@ -59,5 +80,14 @@ export default {
     memory: "Tampilkan memori agent",
     persona: "Tampilkan persona saat ini",
     version: "Tampilkan versi Hermes",
+  },
+  queuedCancel: "Batalkan pesan antrian",
+  worktree: {
+    loading: "Memuat",
+    empty: "Folder kosong",
+    emptyFolder: "Folder kosong",
+    errorLoading: "Gagal memuat konten folder",
+    openTerminal: "Buka terminal di sini",
+    openTerminalFailed: "Tidak dapat membuka terminal untuk folder ini.",
   },
 } as const;

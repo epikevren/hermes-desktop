@@ -4,14 +4,22 @@ export {
   Brain,
   Building,
   ChevronDown,
+  ChevronRight,
+  Circle,
   Clock,
+  Compass,
   Copy,
   Download,
+  Pencil,
+  Plug,
+  Workflow,
   ExternalLink,
   KeyRound,
   Layers,
   Monitor,
   Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
   Puzzle,
   Search,
@@ -37,3 +45,10 @@ export { Ban } from "lucide-react";
 export { RotateCcw } from "lucide-react";
 export { Loader2 as Spinner } from "lucide-react";
 export { Columns3 as Kanban } from "lucide-react";
+export { Eye as VisionIcon } from "lucide-react";
+export { Minimize2 as CompressionIcon } from "lucide-react";
+export { FileText as TitleIcon } from "lucide-react";
+export { Filter as TriageIcon } from "lucide-react";
+export { Shield as ApprovalIcon } from "lucide-react";
+export { Folder as CuratorIcon } from "lucide-react";
+export { User as ProfileIcon } from "lucide-react";

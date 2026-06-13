@@ -10,6 +10,9 @@ export default {
   memory: "Memori",
   tools: "Alat",
   schedules: "Jadwal",
+  kanban: "Kanban",
   gateway: "Gateway",
   settings: "Pengaturan",
+  collapseSidebar: "Ciutkan sidebar",
+  expandSidebar: "Perluas sidebar",
 } as const;

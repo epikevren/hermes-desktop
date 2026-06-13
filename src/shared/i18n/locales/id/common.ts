@@ -1,5 +1,5 @@
 export default {
-  appName: "Hermes Agent",
+  appName: "Hermes One",
   continue: "Lanjutkan",
   cancel: "Batal",
   retry: "Coba lagi",
@@ -41,6 +41,7 @@ export default {
   updateAvailable: "Perbarui v{{version}}",
   downloading: "Mengunduh {{percent}}%",
   restartToUpdate: "Mulai ulang untuk memperbarui",
+  updateFailed: "Pembaruan gagal",
   errorTitle: "Terjadi kesalahan",
   errorMessage: "Terjadi kesalahan tak terduga.",
   tryAgain: "Coba Lagi",
